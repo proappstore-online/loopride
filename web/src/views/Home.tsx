@@ -3,12 +3,15 @@ import type { RecurringRide, View } from '../types'
 import { DAYS } from '../types'
 import { deleteRide, listRides, saveRide } from '../storage'
 import RoleToggle from '../components/RoleToggle'
+import AuthChip from '../components/AuthChip'
+import { useAuth } from '../lib/useAuth'
 
 interface HomeProps {
   onNavigate: (view: View) => void
 }
 
 export default function Home({ onNavigate }: HomeProps) {
+  const auth = useAuth()
   const [rides, setRides] = useState<RecurringRide[]>([])
 
   useEffect(() => {
@@ -29,9 +32,17 @@ export default function Home({ onNavigate }: HomeProps) {
   return (
     <div className="mx-auto max-w-2xl px-4 py-8">
       <header className="mb-8">
-        <div className="mb-4 flex items-center justify-between">
+        <div className="mb-4 flex items-center justify-between gap-3">
           <h1 className="display-font text-3xl font-bold text-[var(--ink)]">Loopride</h1>
-          <RoleToggle role="rider" onNavigate={onNavigate} />
+          <div className="flex items-center gap-3">
+            <AuthChip
+              loading={auth.loading}
+              user={auth.user}
+              onSignIn={auth.signIn}
+              onSignOut={auth.signOut}
+            />
+            <RoleToggle role="rider" onNavigate={onNavigate} />
+          </div>
         </div>
         <div className="flex items-baseline justify-between">
           <p className="text-sm text-[var(--muted)]">Your recurring rides.</p>
@@ -42,6 +53,12 @@ export default function Home({ onNavigate }: HomeProps) {
             + New
           </button>
         </div>
+        {!auth.loading && !auth.user && (
+          <p className="mt-3 rounded-xl bg-[var(--accent-soft)] px-4 py-2 text-xs text-[var(--ink)]">
+            Sign in to track trips live across devices. Without it, live tracking only works
+            in tabs of this browser.
+          </p>
+        )}
       </header>
 
       {rides.length === 0 ? (

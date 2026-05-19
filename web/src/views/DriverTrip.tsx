@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { LatLng, RecurringRide, View } from '../types'
 import { getRide } from '../storage'
 import { useWakeLock } from '../lib/useWakeLock'
-import { publish } from '../lib/channel'
+import { openTransport, type Transport, type TransportKind } from '../lib/transport'
 import TripMap from './TripMap'
 
 interface DriverTripProps {
@@ -26,12 +26,25 @@ export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
   const [accuracy, setAccuracy] = useState<number | null>(null)
   const [speed, setSpeed] = useState<number | null>(null)
   const [geoError, setGeoError] = useState<string | null>(null)
+  const [transportKind, setTransportKind] = useState<TransportKind | null>(null)
+  const transportRef = useRef<Transport | null>(null)
 
   const wakeLock = useWakeLock(phase === 'driving')
 
   useEffect(() => {
     setRide(getRide(rideId))
   }, [rideId])
+
+  useEffect(() => {
+    if (phase === 'pre' || phase === 'done') return
+    const t = openTransport(rideId)
+    transportRef.current = t
+    setTransportKind(t.kind)
+    return () => {
+      t.close()
+      transportRef.current = null
+    }
+  }, [phase, rideId])
 
   useEffect(() => {
     if (phase !== 'driving') return
@@ -60,7 +73,7 @@ export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
 
   useEffect(() => {
     if (phase !== 'driving' || !broadcastPos) return
-    publish({
+    transportRef.current?.publish({
       rideId,
       position: broadcastPos,
       speedMps: speed,
@@ -93,7 +106,7 @@ export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
 
   const onArrived = () => {
     if (ride.pickupCoord && ride.dropoffCoord) {
-      publish({
+      transportRef.current?.publish({
         rideId,
         position: ride.dropoffCoord,
         speedMps: 0,
@@ -108,7 +121,7 @@ export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
 
   const onComplete = () => {
     if (ride.dropoffCoord) {
-      publish({
+      transportRef.current?.publish({
         rideId,
         position: ride.dropoffCoord,
         speedMps: 0,
@@ -239,7 +252,9 @@ export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
       </section>
 
       <p className="mt-6 text-center text-xs text-[var(--muted)]">
-        Position broadcasts cross-tab via BroadcastChannel. Swaps to FAS rooms when auth lands.
+        {transportKind === 'rooms'
+          ? 'Position broadcasts cross-device via FAS rooms.'
+          : 'Position broadcasts cross-tab via BroadcastChannel. Sign in for cross-device.'}
       </p>
     </div>
   )

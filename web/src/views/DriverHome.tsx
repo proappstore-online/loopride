@@ -3,12 +3,15 @@ import type { RecurringRide, View } from '../types'
 import { DAYS } from '../types'
 import { listRides } from '../storage'
 import RoleToggle from '../components/RoleToggle'
+import AuthChip from '../components/AuthChip'
+import { useAuth } from '../lib/useAuth'
 
 interface DriverHomeProps {
   onNavigate: (view: View) => void
 }
 
 export default function DriverHome({ onNavigate }: DriverHomeProps) {
+  const auth = useAuth()
   const [rides, setRides] = useState<RecurringRide[]>([])
 
   useEffect(() => {
@@ -18,9 +21,17 @@ export default function DriverHome({ onNavigate }: DriverHomeProps) {
   return (
     <div className="mx-auto max-w-2xl px-4 py-8">
       <header className="mb-8">
-        <div className="mb-4 flex items-center justify-between">
+        <div className="mb-4 flex items-center justify-between gap-3">
           <h1 className="display-font text-3xl font-bold text-[var(--ink)]">Loopride · Driver</h1>
-          <RoleToggle role="driver" onNavigate={onNavigate} />
+          <div className="flex items-center gap-3">
+            <AuthChip
+              loading={auth.loading}
+              user={auth.user}
+              onSignIn={auth.signIn}
+              onSignOut={auth.signOut}
+            />
+            <RoleToggle role="driver" onNavigate={onNavigate} />
+          </div>
         </div>
         <p className="text-sm text-[var(--muted)]">Trips you can drive.</p>
       </header>

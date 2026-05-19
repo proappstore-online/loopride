@@ -85,3 +85,34 @@ test('day toggle switches aria-pressed on the NewRide form', async ({ page }) =>
   await mon.click()
   await expect(mon).toHaveAttribute('aria-pressed', 'false')
 })
+
+function shareUrl(baseUrl: string, ride: object): string {
+  const payload = JSON.stringify(ride)
+  const b64 = Buffer.from(payload, 'utf-8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '')
+  return `${baseUrl}#ride=${b64}`
+}
+
+test('driver opens a share link, ride imports, transport opens', async ({ page, baseURL }) => {
+  const ride = {
+    id: 'shared-ride-e2e',
+    pickup: 'Pickup Street 1',
+    pickupCoord: { lat: -33.87, lng: 151.21 },
+    dropoff: 'Dropoff Avenue 9',
+    dropoffCoord: { lat: -33.86, lng: 151.22 },
+    days: ['mon', 'wed', 'fri'],
+    time: '07:30',
+    driverName: 'Driver Dan',
+    paused: false,
+    createdAt: 1,
+  }
+  const url = shareUrl(`${baseURL}/`, ride)
+  await page.goto(url)
+  await expect(page.getByText('Driving')).toBeVisible()
+  await expect(page.getByText('Pickup Street 1 → Dropoff Avenue 9')).toBeVisible()
+  // Hash should be cleaned up so reloads don't re-import.
+  expect(await page.evaluate(() => window.location.hash)).toBe('')
+})

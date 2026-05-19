@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import type { LatLng, RecurringRide, View } from '../types'
 import { DAYS } from '../types'
 import { getRide } from '../storage'
-import { subscribe, type DriverPing } from '../lib/channel'
+import { openTransport, type DriverPing, type TransportKind } from '../lib/transport'
+import { encodeShareUrl } from '../lib/share'
 import TripMap from './TripMap'
 
 const TOTAL_ETA = 8
@@ -20,6 +21,8 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
   const [status, setStatus] = useState<TripStatus>('scheduled')
   const [eta, setEta] = useState<number>(TOTAL_ETA)
   const [lastPing, setLastPing] = useState<DriverPing | null>(null)
+  const [transportKind, setTransportKind] = useState<TransportKind | null>(null)
+  const [copied, setCopied] = useState(false)
   const [, setNow] = useState(Date.now())
 
   useEffect(() => {
@@ -27,14 +30,19 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
   }, [rideId])
 
   useEffect(() => {
-    const unsub = subscribe(rideId, (ping) => {
+    const transport = openTransport(rideId)
+    setTransportKind(transport.kind)
+    const unsub = transport.subscribe((ping) => {
       setLastPing(ping)
-      if (ping.status === 'en-route' && status === 'scheduled') setStatus('en-route')
+      if (ping.status === 'en-route') setStatus((s) => (s === 'scheduled' ? 'en-route' : s))
       if (ping.status === 'arrived') setStatus('arrived')
       if (ping.status === 'completed') setStatus('completed')
     })
-    return unsub
-  }, [rideId, status])
+    return () => {
+      unsub()
+      transport.close()
+    }
+  }, [rideId])
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000)
@@ -117,6 +125,26 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
             .join(', ')}{' '}
           at <span className="tabular-nums">{ride.time}</span> with {ride.driverName}
         </p>
+        <div className="mt-4 flex items-center gap-3">
+          <button
+            onClick={async () => {
+              const url = encodeShareUrl(ride)
+              try {
+                await navigator.clipboard.writeText(url)
+                setCopied(true)
+                setTimeout(() => setCopied(false), 2000)
+              } catch {
+                window.prompt('Copy this link and send to your driver:', url)
+              }
+            }}
+            className="rounded-xl border border-[var(--line)] px-3 py-1.5 text-xs font-semibold text-[var(--ink)] hover:bg-[var(--accent-soft)]"
+          >
+            {copied ? 'Copied!' : 'Send to driver'}
+          </button>
+          <span className="text-[10px] text-[var(--muted)]">
+            Driver opens the link → ride imports → they drive.
+          </span>
+        </div>
       </section>
 
       <section className="mt-4 rounded-3xl border border-[var(--line)] p-6">
@@ -180,7 +208,9 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
       </section>
 
       <p className="mt-6 text-center text-xs text-[var(--muted)]">
-        Open the Driver tab in another tab to drive this trip and see the dot move live.
+        {transportKind === 'rooms'
+          ? 'Live tracking is cross-device via FAS rooms.'
+          : 'Live tracking is same-browser only. Sign in to enable cross-device.'}
       </p>
     </div>
   )
