@@ -9,6 +9,9 @@
     "build": "pnpm --filter @loopride/web build",
     "preview": "pnpm --filter @loopride/web preview",
     "typecheck": "pnpm --filter @loopride/web exec tsc -b",
-    "test": "pnpm --filter @loopride/web exec tsc -b"
+    "test": "pnpm --filter @loopride/web test",
+    "test:watch": "pnpm --filter @loopride/web test:watch",
+    "test:coverage": "pnpm --filter @loopride/web test:coverage",
+    "test:e2e": "pnpm --filter @loopride/web test:e2e"
   }
 }

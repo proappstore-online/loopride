@@ -91,7 +91,10 @@ export default function NewRide({ onNavigate }: NewRideProps) {
           />
         </Field>
 
-        <Field label="Days">
+        <fieldset>
+          <legend className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
+            Days
+          </legend>
           <div className="flex flex-wrap gap-2">
             {DAYS.map((d) => {
               const on = days.includes(d.id)
@@ -99,6 +102,7 @@ export default function NewRide({ onNavigate }: NewRideProps) {
                 <button
                   key={d.id}
                   type="button"
+                  aria-pressed={on}
                   onClick={() => toggleDay(d.id)}
                   className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
                     on
@@ -111,7 +115,7 @@ export default function NewRide({ onNavigate }: NewRideProps) {
               )
             })}
           </div>
-        </Field>
+        </fieldset>
 
         <Field label="Time">
           <input
