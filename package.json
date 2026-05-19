@@ -1,0 +1,14 @@
+{
+  "name": "loopride",
+  "private": true,
+  "packageManager": "pnpm@10.30.3",
+  "engines": { "node": ">=22" },
+  "repository": { "type": "git", "url": "git+https://github.com/proappstore-online/loopride.git" },
+  "scripts": {
+    "dev": "pnpm --filter @loopride/web dev",
+    "build": "pnpm --filter @loopride/web build",
+    "preview": "pnpm --filter @loopride/web preview",
+    "typecheck": "pnpm --filter @loopride/web exec tsc -b",
+    "test": "pnpm --filter @loopride/web exec tsc -b"
+  }
+}
