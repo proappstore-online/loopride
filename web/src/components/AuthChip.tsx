@@ -1,9 +1,11 @@
 import type { User } from '@proappstore/sdk/hooks'
 
+export type SignInProvider = 'github' | 'google'
+
 interface AuthChipProps {
   loading: boolean
   user: User | null
-  onSignIn: () => void
+  onSignIn: (provider: SignInProvider) => void
   onSignOut: () => void
 }
 
@@ -13,12 +15,25 @@ export default function AuthChip({ loading, user, onSignIn, onSignOut }: AuthChi
   }
   if (!user) {
     return (
-      <button
-        onClick={onSignIn}
-        className="rounded-full border border-[var(--line)] px-3 py-1 text-xs font-semibold text-[var(--ink)] hover:bg-[var(--accent-soft)]"
-      >
-        Sign in
-      </button>
+      <div className="inline-flex items-center gap-1">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+          Sign in
+        </span>
+        <button
+          onClick={() => onSignIn('google')}
+          aria-label="Sign in with Google"
+          className="rounded-full border border-[var(--line)] px-3 py-1 text-xs font-semibold text-[var(--ink)] hover:bg-[var(--accent-soft)]"
+        >
+          Google
+        </button>
+        <button
+          onClick={() => onSignIn('github')}
+          aria-label="Sign in with GitHub"
+          className="rounded-full border border-[var(--line)] px-3 py-1 text-xs font-semibold text-[var(--ink)] hover:bg-[var(--accent-soft)]"
+        >
+          GitHub
+        </button>
+      </div>
     )
   }
   return (

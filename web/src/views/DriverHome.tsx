@@ -5,6 +5,7 @@ import { listRides } from '../storage'
 import RoleToggle from '../components/RoleToggle'
 import AuthChip from '../components/AuthChip'
 import { useAuth } from '../lib/useAuth'
+import { app } from '../lib/app'
 
 interface DriverHomeProps {
   onNavigate: (view: View) => void
@@ -27,7 +28,7 @@ export default function DriverHome({ onNavigate }: DriverHomeProps) {
             <AuthChip
               loading={auth.loading}
               user={auth.user}
-              onSignIn={auth.signIn}
+              onSignIn={(provider) => app.auth.signIn(provider)}
               onSignOut={auth.signOut}
             />
             <RoleToggle role="driver" onNavigate={onNavigate} />

@@ -5,6 +5,7 @@ import { deleteRide, listRides, saveRide } from '../storage'
 import RoleToggle from '../components/RoleToggle'
 import AuthChip from '../components/AuthChip'
 import { useAuth } from '../lib/useAuth'
+import { app } from '../lib/app'
 
 interface HomeProps {
   onNavigate: (view: View) => void
@@ -38,7 +39,7 @@ export default function Home({ onNavigate }: HomeProps) {
             <AuthChip
               loading={auth.loading}
               user={auth.user}
-              onSignIn={auth.signIn}
+              onSignIn={(provider) => app.auth.signIn(provider)}
               onSignOut={auth.signOut}
             />
             <RoleToggle role="rider" onNavigate={onNavigate} />
