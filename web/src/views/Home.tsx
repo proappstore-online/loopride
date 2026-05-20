@@ -6,6 +6,7 @@ import AuthChip from '../components/AuthChip'
 import { useAuth } from '../lib/useAuth'
 import { useRideList } from '../lib/useRideList'
 import { app } from '../lib/app'
+import { showToast } from '../lib/toast'
 
 interface HomeProps {
   onNavigate: (view: View) => void
@@ -17,6 +18,15 @@ export default function Home({ onNavigate }: HomeProps) {
 
   const togglePause = (ride: RecurringRide) => {
     saveRide({ ...ride, paused: !ride.paused })
+  }
+
+  const remove = (ride: RecurringRide) => {
+    deleteRide(ride.id)
+    const label = ride.pickup ? `Deleted ${ride.pickup} → ${ride.dropoff}` : 'Deleted ride'
+    showToast({
+      message: label,
+      action: { label: 'Undo', onClick: () => saveRide(ride) },
+    })
   }
 
   return (
@@ -97,7 +107,7 @@ export default function Home({ onNavigate }: HomeProps) {
                   {ride.paused ? 'Resume' : 'Pause'}
                 </button>
                 <button
-                  onClick={() => deleteRide(ride.id)}
+                  onClick={() => remove(ride)}
                   className="rounded-xl border border-[var(--line)] px-3 py-1 text-xs font-medium text-[var(--error)] hover:bg-[var(--accent-soft)]"
                 >
                   Delete

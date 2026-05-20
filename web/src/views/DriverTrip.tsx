@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import type { LatLng, RecurringRide, View } from '../types'
-import { getRide } from '../storage'
+import { getRide, saveRide } from '../storage'
 import { useWakeLock } from '../lib/useWakeLock'
 import { openTransport, type Transport, type TransportKind } from '../lib/transport'
 import { interpolate } from '../lib/geo'
@@ -157,6 +157,8 @@ export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
             pickup={ride.pickupCoord}
             dropoff={ride.dropoffCoord}
             driver={phase === 'driving' || phase === 'arrived' ? broadcastPos : null}
+            routePolyline={ride.routePolyline}
+            onRouteFetched={(coords) => saveRide({ ...ride, routePolyline: coords })}
           />
         </Suspense>
       </section>

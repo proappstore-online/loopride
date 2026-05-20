@@ -2,10 +2,15 @@ import { describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
-const { geocode } = vi.hoisted(() => ({ geocode: vi.fn() }))
+const { geocode, firstMatch, fetchRoute } = vi.hoisted(() => ({
+  geocode: vi.fn(),
+  firstMatch: vi.fn(),
+  fetchRoute: vi.fn(),
+}))
+vi.mock('../lib/maps', () => ({ geocode, firstMatch }))
+vi.mock('../lib/routing', () => ({ fetchRoute }))
 vi.mock('../lib/app', () => ({
   app: {
-    maps: { geocode },
     auth: { token: null, onChange: () => () => undefined },
     kv: { set: vi.fn(), get: vi.fn() },
   },
@@ -36,11 +41,21 @@ describe('NewRide', () => {
     expect(mon).toHaveAttribute('aria-pressed', 'true')
   })
 
-  it('geocodes both addresses, saves the ride, and navigates home', async () => {
-    geocode.mockReset()
-    geocode
-      .mockResolvedValueOnce([{ lat: -33.8, lng: 151.2, displayName: 'Home', address: {}, type: 'house', importance: 0.5 }])
-      .mockResolvedValueOnce([{ lat: -33.85, lng: 151.21, displayName: 'School', address: {}, type: 'school', importance: 0.5 }])
+  it('geocodes both addresses, fetches route, saves the ride with polyline', async () => {
+    firstMatch.mockReset()
+    firstMatch
+      .mockResolvedValueOnce({ lat: -33.8, lng: 151.2 })
+      .mockResolvedValueOnce({ lat: -33.85, lng: 151.21 })
+    fetchRoute.mockReset()
+    fetchRoute.mockResolvedValueOnce({
+      coordinates: [
+        [151.2, -33.8],
+        [151.205, -33.825],
+        [151.21, -33.85],
+      ],
+      distanceMeters: 1234,
+      durationSeconds: 240,
+    })
 
     const onNavigate = vi.fn()
     render(<NewRide onNavigate={onNavigate} />)
@@ -50,7 +65,8 @@ describe('NewRide', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save ride' }))
 
     await waitFor(() => expect(onNavigate).toHaveBeenCalledWith({ name: 'home' }))
-    expect(geocode).toHaveBeenCalledTimes(2)
+    expect(firstMatch).toHaveBeenCalledTimes(2)
+    expect(fetchRoute).toHaveBeenCalledTimes(1)
     const rides = listRides()
     expect(rides).toHaveLength(1)
     expect(rides[0]).toMatchObject({
@@ -60,12 +76,18 @@ describe('NewRide', () => {
       dropoffCoord: { lat: -33.85, lng: 151.21 },
       driverName: 'Alex',
       paused: false,
+      routePolyline: [
+        [151.2, -33.8],
+        [151.205, -33.825],
+        [151.21, -33.85],
+      ],
     })
   })
 
   it('saves ride with null coords when geocode returns no results', async () => {
-    geocode.mockReset()
-    geocode.mockResolvedValue([])
+    firstMatch.mockReset()
+    firstMatch.mockResolvedValue(null)
+    fetchRoute.mockReset()
     const onNavigate = vi.fn()
     render(<NewRide onNavigate={onNavigate} />)
     await userEvent.type(screen.getByPlaceholderText('123 Home Street'), 'X')
@@ -74,11 +96,28 @@ describe('NewRide', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save ride' }))
     await waitFor(() => expect(onNavigate).toHaveBeenCalled())
     expect(listRides()[0]).toMatchObject({ pickupCoord: null, dropoffCoord: null })
+    expect(listRides()[0].routePolyline).toBeUndefined()
+    expect(fetchRoute).not.toHaveBeenCalled()
+  })
+
+  it('saves ride without polyline when fetchRoute fails', async () => {
+    firstMatch.mockReset()
+    firstMatch.mockResolvedValue({ lat: 1, lng: 2 })
+    fetchRoute.mockReset()
+    fetchRoute.mockRejectedValueOnce(new Error('OSRM down'))
+    const onNavigate = vi.fn()
+    render(<NewRide onNavigate={onNavigate} />)
+    await userEvent.type(screen.getByPlaceholderText('123 Home Street'), 'X')
+    await userEvent.type(screen.getByPlaceholderText('456 School Road'), 'Y')
+    await userEvent.type(screen.getByPlaceholderText('e.g. Alex Smith'), 'A')
+    await userEvent.click(screen.getByRole('button', { name: 'Save ride' }))
+    await waitFor(() => expect(onNavigate).toHaveBeenCalled())
+    expect(listRides()[0].routePolyline).toBeUndefined()
   })
 
   it('surfaces an error and stays on the form when geocode rejects', async () => {
-    geocode.mockReset()
-    geocode.mockRejectedValue(new Error('Nominatim down'))
+    firstMatch.mockReset()
+    firstMatch.mockRejectedValue(new Error('Nominatim down'))
     const onNavigate = vi.fn()
     render(<NewRide onNavigate={onNavigate} />)
     await userEvent.type(screen.getByPlaceholderText('123 Home Street'), 'X')

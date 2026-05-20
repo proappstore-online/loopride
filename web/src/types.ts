@@ -26,6 +26,12 @@ export interface RecurringRide {
   driverName: string
   paused: boolean
   createdAt: number
+  /**
+   * Cached driving polyline from /v1/maps/route. GeoJSON LineString
+   * coordinates ([lng, lat] order). Optional — populated at ride creation
+   * when the route fetch succeeds, fetched lazily otherwise.
+   */
+  routePolyline?: [number, number][]
 }
 
 export type Role = 'rider' | 'driver'

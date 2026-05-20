@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import type { DayOfWeek, LatLng, RecurringRide, View } from '../types'
 import { DAYS } from '../types'
 import { saveRide } from '../storage'
-import { app } from '../lib/app'
+import { firstMatch, geocode } from '../lib/maps'
+import { fetchRoute } from '../lib/routing'
 import { LIMITS } from '../lib/constants'
 
 interface NewRideProps {
@@ -52,8 +53,7 @@ export default function NewRide({ onNavigate }: NewRideProps) {
 
   const ensureCoord = async (q: string, picked: LatLng | null): Promise<LatLng | null> => {
     if (picked) return picked
-    const results = await app.maps.geocode(q, 1)
-    return results[0] ? { lat: results[0].lat, lng: results[0].lng } : null
+    return firstMatch(q)
   }
 
   const submit = async (e: React.FormEvent) => {
@@ -69,6 +69,20 @@ export default function NewRide({ onNavigate }: NewRideProps) {
         ensureCoord(trimmedPickup, pickupCoord),
         ensureCoord(trimmedDropoff, dropoffCoord),
       ])
+
+      // Pre-fetch the route polyline so the Trip view paints the real
+      // road line instantly without an extra round-trip. Best-effort —
+      // a failed route fetch still saves the ride.
+      let routePolyline: [number, number][] | undefined
+      if (resolvedPickup && resolvedDropoff) {
+        try {
+          const route = await fetchRoute(resolvedPickup, resolvedDropoff)
+          routePolyline = route.coordinates
+        } catch {
+          // Map will lazy-fetch the next time it opens.
+        }
+      }
+
       const ride: RecurringRide = {
         id: crypto.randomUUID(),
         pickup: trimmedPickup,
@@ -80,6 +94,7 @@ export default function NewRide({ onNavigate }: NewRideProps) {
         driverName: trimmedDriver,
         paused: false,
         createdAt: Date.now(),
+        routePolyline,
       }
       saveRide(ride)
       onNavigate({ name: 'home' })
@@ -241,34 +256,34 @@ function AddressInput({
       setLastSearched('')
       return
     }
-    let cancelled = false
+    const controller = new AbortController()
     const handle = setTimeout(async () => {
       setLoading(true)
       try {
-        const results = await app.maps.geocode(q, 5)
-        if (!cancelled) {
-          setSuggestions(
-            results.map((r) => ({
-              lat: r.lat,
-              lng: r.lng,
-              displayName: r.displayName,
-              shortName: shortNameFor(r.displayName),
-            })),
-          )
-          setLastSearched(q)
-        }
-      } catch {
-        if (!cancelled) {
-          setSuggestions([])
-          setLastSearched(q)
-        }
+        const results = await geocode(q, 5, { signal: controller.signal })
+        if (controller.signal.aborted) return
+        setSuggestions(
+          results.map((r) => ({
+            lat: r.lat,
+            lng: r.lng,
+            displayName: r.displayName,
+            shortName: shortNameFor(r.displayName),
+          })),
+        )
+        setLastSearched(q)
+      } catch (err) {
+        // AbortError is the expected "user kept typing" path — leave the
+        // current suggestions in place so the dropdown doesn't flicker.
+        if ((err as { name?: string })?.name === 'AbortError') return
+        setSuggestions([])
+        setLastSearched(q)
       } finally {
-        if (!cancelled) setLoading(false)
+        if (!controller.signal.aborted) setLoading(false)
       }
     }, 300)
     return () => {
-      cancelled = true
       clearTimeout(handle)
+      controller.abort()
     }
   }, [value])
 

@@ -5,7 +5,6 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "prebuild": "echo \"compliance check temporarily skipped — see CHANGELOG\"",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",

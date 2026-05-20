@@ -8,14 +8,19 @@ import DriverHome from './views/DriverHome'
 import DriverTrip from './views/DriverTrip'
 import { getRole, setRole } from './lib/mode'
 import { clearShareHash, decodeShareHash } from './lib/share'
-import { saveRide } from './storage'
+import { getRide, saveRide } from './storage'
 import { useRideSync } from './lib/rideSync'
 
 function consumeShareHash(): View | null {
   if (typeof window === 'undefined') return null
   const incoming = decodeShareHash(window.location.hash)
   if (!incoming) return null
-  saveRide(incoming)
+  // Re-imports of a ride already in storage skip the save — avoids
+  // clobbering local edits (paused state, route polyline cache) with the
+  // payload from the link, which is a snapshot from the rider's device.
+  if (!getRide(incoming.id)) {
+    saveRide(incoming)
+  }
   clearShareHash()
   // Whoever opens a share link is acting as the driver for that ride.
   setRole('driver')

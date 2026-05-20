@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import type { LatLng, RecurringRide, View } from '../types'
 import { DAYS } from '../types'
-import { getRide } from '../storage'
+import { getRide, saveRide } from '../storage'
 import { openTransport, type DriverPing, type TransportKind } from '../lib/transport'
 import { encodeShareUrl } from '../lib/share'
 import { interpolate } from '../lib/geo'
@@ -113,6 +113,8 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
             pickup={ride.pickupCoord}
             dropoff={ride.dropoffCoord}
             driver={driverPosition}
+            routePolyline={ride.routePolyline}
+            onRouteFetched={(coords) => saveRide({ ...ride, routePolyline: coords })}
           />
         </Suspense>
       </section>

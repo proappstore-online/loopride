@@ -12,6 +12,10 @@ interface TripMapProps {
   pickup: LatLng | null
   dropoff: LatLng | null
   driver: LatLng | null
+  /** If present, used as the route line immediately — no fetch needed. */
+  routePolyline?: [number, number][]
+  /** Called with freshly-fetched polyline so the parent can persist it. */
+  onRouteFetched?: (coordinates: [number, number][]) => void
 }
 
 const OSM_STYLE = {
@@ -57,7 +61,13 @@ function straightLine(pickup: LatLng, dropoff: LatLng): [number, number][] {
   ]
 }
 
-export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
+export default function TripMap({
+  pickup,
+  dropoff,
+  driver,
+  routePolyline,
+  onRouteFetched,
+}: TripMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<MapLibreMap | null>(null)
   const mapLoaded = useRef(false)
@@ -156,6 +166,7 @@ export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
     if (!map) return
 
     let cancelled = false
+    const controller = new AbortController()
 
     const apply = (coords: [number, number][], isReal: boolean) => {
       if (cancelled || !map.isStyleLoaded()) return
@@ -171,11 +182,20 @@ export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
     }
 
     const update = () => {
+      if (routePolyline && routePolyline.length > 1) {
+        // Cached on the ride — paint immediately, skip the fetch.
+        apply(routePolyline, true)
+        return
+      }
       apply(straightLine(pickup, dropoff), false)
-      fetchRoute(pickup, dropoff)
-        .then((route) => apply(route.coordinates, true))
+      fetchRoute(pickup, dropoff, { signal: controller.signal })
+        .then((route) => {
+          apply(route.coordinates, true)
+          onRouteFetched?.(route.coordinates)
+        })
         .catch(() => {
-          // Keep the straight line we already drew.
+          // AbortError on unmount/coord change OR network failure — straight
+          // line is already showing, leave it.
         })
     }
 
@@ -184,9 +204,10 @@ export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
 
     return () => {
       cancelled = true
+      controller.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng])
+  }, [pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng, routePolyline])
 
   // Driver dot
   useEffect(() => {
