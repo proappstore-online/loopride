@@ -1,4 +1,5 @@
-import type { RecurringRide, View } from '../types'
+import { useLocation } from 'wouter'
+import type { RecurringRide } from '../types'
 import { DAYS } from '../types'
 import { deleteRide, saveRide } from '../storage'
 import RoleToggle from '../components/RoleToggle'
@@ -8,13 +9,10 @@ import { useRideList } from '../lib/useRideList'
 import { app } from '../lib/app'
 import { showToast } from '../lib/toast'
 
-interface HomeProps {
-  onNavigate: (view: View) => void
-}
-
-export default function Home({ onNavigate }: HomeProps) {
+export default function Home() {
   const auth = useAuth()
   const rides = useRideList()
+  const [, setLocation] = useLocation()
 
   const togglePause = (ride: RecurringRide) => {
     saveRide({ ...ride, paused: !ride.paused })
@@ -41,13 +39,13 @@ export default function Home({ onNavigate }: HomeProps) {
               onSignIn={(provider) => app.auth.signIn(provider)}
               onSignOut={auth.signOut}
             />
-            <RoleToggle role="rider" onNavigate={onNavigate} />
+            <RoleToggle role="rider" />
           </div>
         </div>
         <div className="flex items-baseline justify-between">
           <p className="text-sm text-[var(--muted)]">Your recurring rides.</p>
           <button
-            onClick={() => onNavigate({ name: 'new' })}
+            onClick={() => setLocation('/new')}
             className="rounded-2xl bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-white"
           >
             + New
@@ -68,7 +66,7 @@ export default function Home({ onNavigate }: HomeProps) {
             Set up a recurring ride and a driver. Same route, same time, every week.
           </p>
           <button
-            onClick={() => onNavigate({ name: 'new' })}
+            onClick={() => setLocation('/new')}
             className="mt-6 rounded-2xl bg-[var(--accent)] px-5 py-2.5 text-sm font-semibold text-white"
           >
             Create your first ride
@@ -82,7 +80,7 @@ export default function Home({ onNavigate }: HomeProps) {
               className="rounded-2xl border border-[var(--line)] p-5 transition-colors hover:bg-[var(--accent-soft)]"
             >
               <button
-                onClick={() => onNavigate({ name: 'trip', rideId: ride.id })}
+                onClick={() => setLocation(`/trip/${ride.id}`)}
                 className="block w-full text-left"
               >
                 <div className="flex items-baseline justify-between">

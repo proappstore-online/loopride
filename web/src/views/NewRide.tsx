@@ -1,14 +1,12 @@
 import { useEffect, useState } from 'react'
-import type { DayOfWeek, LatLng, RecurringRide, View } from '../types'
+import { useLocation } from 'wouter'
+import type { DayOfWeek, LatLng, RecurringRide } from '../types'
 import { DAYS } from '../types'
 import { saveRide } from '../storage'
 import { firstMatch, geocode } from '../lib/maps'
 import { fetchRoute } from '../lib/routing'
 import { LIMITS } from '../lib/constants'
 
-interface NewRideProps {
-  onNavigate: (view: View) => void
-}
 
 interface GeoSuggestion {
   lat: number
@@ -34,7 +32,8 @@ function shortNameFor(displayName: string): string {
   return parts[0]
 }
 
-export default function NewRide({ onNavigate }: NewRideProps) {
+export default function NewRide() {
+  const [, setLocation] = useLocation()
   const [pickup, setPickup] = useState('')
   const [pickupCoord, setPickupCoord] = useState<LatLng | null>(null)
   const [dropoff, setDropoff] = useState('')
@@ -97,7 +96,7 @@ export default function NewRide({ onNavigate }: NewRideProps) {
         routePolyline,
       }
       saveRide(ride)
-      onNavigate({ name: 'home' })
+      setLocation('/')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save ride')
       setSaving(false)
@@ -108,7 +107,7 @@ export default function NewRide({ onNavigate }: NewRideProps) {
     <div className="mx-auto max-w-2xl px-4 py-8">
       <header className="mb-8 flex items-baseline gap-4">
         <button
-          onClick={() => onNavigate({ name: 'home' })}
+          onClick={() => setLocation('/')}
           className="rounded-xl border border-[var(--line)] px-3 py-1 text-xs font-medium text-[var(--ink)] hover:bg-[var(--accent-soft)]"
         >
           ← Back
@@ -216,7 +215,7 @@ export default function NewRide({ onNavigate }: NewRideProps) {
           </button>
           <button
             type="button"
-            onClick={() => onNavigate({ name: 'home' })}
+            onClick={() => setLocation('/')}
             className="rounded-2xl border border-[var(--line)] px-6 py-2.5 text-sm font-semibold text-[var(--ink)]"
           >
             Cancel

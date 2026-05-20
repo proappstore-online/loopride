@@ -1,4 +1,4 @@
-import type { View } from '../types'
+import { useLocation } from 'wouter'
 import { DAYS } from '../types'
 import RoleToggle from '../components/RoleToggle'
 import AuthChip from '../components/AuthChip'
@@ -6,13 +6,10 @@ import { useAuth } from '../lib/useAuth'
 import { useRideList } from '../lib/useRideList'
 import { app } from '../lib/app'
 
-interface DriverHomeProps {
-  onNavigate: (view: View) => void
-}
-
-export default function DriverHome({ onNavigate }: DriverHomeProps) {
+export default function DriverHome() {
   const auth = useAuth()
   const rides = useRideList()
+  const [, setLocation] = useLocation()
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-8">
@@ -26,7 +23,7 @@ export default function DriverHome({ onNavigate }: DriverHomeProps) {
               onSignIn={(provider) => app.auth.signIn(provider)}
               onSignOut={auth.signOut}
             />
-            <RoleToggle role="driver" onNavigate={onNavigate} />
+            <RoleToggle role="driver" />
           </div>
         </div>
         <p className="text-sm text-[var(--muted)]">Trips you can drive.</p>
@@ -46,7 +43,7 @@ export default function DriverHome({ onNavigate }: DriverHomeProps) {
                 className="rounded-2xl border border-[var(--line)] p-5 transition-colors hover:bg-[var(--accent-soft)]"
               >
                 <button
-                  onClick={() => ready && onNavigate({ name: 'driver-trip', rideId: ride.id })}
+                  onClick={() => ready && setLocation(`/driver/${ride.id}`)}
                   disabled={!ready}
                   className="block w-full text-left disabled:opacity-50"
                 >

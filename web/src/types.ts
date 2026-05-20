@@ -35,10 +35,3 @@ export interface RecurringRide {
 }
 
 export type Role = 'rider' | 'driver'
-
-export type View =
-  | { name: 'home' }
-  | { name: 'new' }
-  | { name: 'trip'; rideId: string }
-  | { name: 'driver-home' }
-  | { name: 'driver-trip'; rideId: string }

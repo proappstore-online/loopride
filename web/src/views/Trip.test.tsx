@@ -12,6 +12,7 @@ import Trip from './Trip'
 import { saveRide } from '../storage'
 import { publish } from '../lib/channel'
 import type { RecurringRide } from '../types'
+import { renderWithRouter } from '../../test/router'
 
 const ride: RecurringRide = {
   id: 'ride-trip',
@@ -31,7 +32,7 @@ const tick = () => new Promise((r) => setTimeout(r, 30))
 describe('Trip', () => {
   it('renders ride summary and shows scheduled by default', () => {
     saveRide(ride)
-    render(<Trip rideId="ride-trip" onNavigate={vi.fn()} />)
+    render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
     expect(screen.getByText('A → B')).toBeInTheDocument()
     expect(screen.getByText(/Alex/)).toBeInTheDocument()
     expect(screen.getByText('Scheduled')).toBeInTheDocument()
@@ -40,19 +41,19 @@ describe('Trip', () => {
 
   it('Simulate: driver on way switches status to en-route', async () => {
     saveRide(ride)
-    render(<Trip rideId="ride-trip" onNavigate={vi.fn()} />)
+    render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
     await userEvent.click(screen.getByRole('button', { name: 'Simulate: driver on way' }))
     expect(screen.getByText(/Driver en route/)).toBeInTheDocument()
   })
 
   it('shows Ride not found for unknown id', () => {
-    render(<Trip rideId="missing" onNavigate={vi.fn()} />)
+    render(renderWithRouter(<Trip rideId="missing" />).ui)
     expect(screen.getByText('Ride not found.')).toBeInTheDocument()
   })
 
   it('reacts to a channel ping with status en-route', async () => {
     saveRide(ride)
-    render(<Trip rideId="ride-trip" onNavigate={vi.fn()} />)
+    render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
     expect(screen.getByText('Scheduled')).toBeInTheDocument()
 
     await act(async () => {
@@ -74,7 +75,7 @@ describe('Trip', () => {
 
   it('ignores pings for other ride ids', async () => {
     saveRide(ride)
-    render(<Trip rideId="ride-trip" onNavigate={vi.fn()} />)
+    render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
 
     await act(async () => {
       publish({
@@ -94,7 +95,7 @@ describe('Trip', () => {
 
   it('stale ping keeps the dot at last known position (no snap back)', async () => {
     saveRide(ride)
-    render(<Trip rideId="ride-trip" onNavigate={vi.fn()} />)
+    render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
 
     await act(async () => {
       publish({
@@ -116,7 +117,7 @@ describe('Trip', () => {
 
   it('arrived ping moves status to arrived', async () => {
     saveRide(ride)
-    render(<Trip rideId="ride-trip" onNavigate={vi.fn()} />)
+    render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
 
     await act(async () => {
       publish({

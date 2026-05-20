@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import type { LatLng, RecurringRide, View } from '../types'
+import { useLocation } from 'wouter'
+import type { LatLng, RecurringRide } from '../types'
 import { getRide, saveRide } from '../storage'
 import { useWakeLock } from '../lib/useWakeLock'
 import { openTransport, type Transport, type TransportKind } from '../lib/transport'
@@ -9,12 +10,12 @@ const TripMap = lazy(() => import('./TripMap'))
 
 interface DriverTripProps {
   rideId: string
-  onNavigate: (view: View) => void
 }
 
 type Phase = 'pre' | 'driving' | 'arrived' | 'done'
 
-export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
+export default function DriverTrip({ rideId }: DriverTripProps) {
+  const [, setLocation] = useLocation()
   const [ride, setRide] = useState<RecurringRide | undefined>(undefined)
   const [phase, setPhase] = useState<Phase>('pre')
   const [simStep, setSimStep] = useState(0)
@@ -86,7 +87,7 @@ export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
     return (
       <div className="mx-auto max-w-2xl px-4 py-8">
         <button
-          onClick={() => onNavigate({ name: 'driver-home' })}
+          onClick={() => setLocation('/driver')}
           className="rounded-xl border border-[var(--line)] px-3 py-1 text-xs font-medium text-[var(--ink)]"
         >
           ← Back
@@ -130,14 +131,14 @@ export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
       })
     }
     setPhase('done')
-    onNavigate({ name: 'driver-home' })
+    setLocation('/driver')
   }
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-8">
       <header className="mb-6 flex items-baseline gap-4">
         <button
-          onClick={() => onNavigate({ name: 'driver-home' })}
+          onClick={() => setLocation('/driver')}
           className="rounded-xl border border-[var(--line)] px-3 py-1 text-xs font-medium text-[var(--ink)] hover:bg-[var(--accent-soft)]"
         >
           ← Back

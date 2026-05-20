@@ -19,7 +19,8 @@
     "@proappstore/sdk": "^1.5.0",
     "maplibre-gl": "^5.24.0",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react-dom": "^19.2.5",
+    "wouter": "^3.9.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

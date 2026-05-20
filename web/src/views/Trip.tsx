@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import type { LatLng, RecurringRide, View } from '../types'
+import { useLocation } from 'wouter'
+import type { LatLng, RecurringRide } from '../types'
 import { DAYS } from '../types'
 import { getRide, saveRide } from '../storage'
 import { openTransport, type DriverPing, type TransportKind } from '../lib/transport'
@@ -12,12 +13,12 @@ const TOTAL_ETA = 8
 
 interface TripProps {
   rideId: string
-  onNavigate: (view: View) => void
 }
 
 type TripStatus = 'scheduled' | 'en-route' | 'arrived' | 'completed'
 
-export default function Trip({ rideId, onNavigate }: TripProps) {
+export default function Trip({ rideId }: TripProps) {
+  const [, setLocation] = useLocation()
   const [ride, setRide] = useState<RecurringRide | undefined>(undefined)
   const [status, setStatus] = useState<TripStatus>('scheduled')
   const [eta, setEta] = useState<number>(TOTAL_ETA)
@@ -77,7 +78,7 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
     return (
       <div className="mx-auto max-w-2xl px-4 py-8">
         <button
-          onClick={() => onNavigate({ name: 'home' })}
+          onClick={() => setLocation('/')}
           className="rounded-xl border border-[var(--line)] px-3 py-1 text-xs font-medium text-[var(--ink)]"
         >
           ← Back
@@ -93,7 +94,7 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
     <div className="mx-auto max-w-2xl px-4 py-8">
       <header className="mb-6 flex items-baseline gap-4">
         <button
-          onClick={() => onNavigate({ name: 'home' })}
+          onClick={() => setLocation('/')}
           className="rounded-xl border border-[var(--line)] px-3 py-1 text-xs font-medium text-[var(--ink)] hover:bg-[var(--accent-soft)]"
         >
           ← Back
@@ -214,7 +215,7 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
           )}
           {status === 'completed' && (
             <button
-              onClick={() => onNavigate({ name: 'home' })}
+              onClick={() => setLocation('/')}
               className="rounded-2xl border border-[var(--line)] px-5 py-2 text-sm font-semibold text-[var(--ink)]"
             >
               Back to rides

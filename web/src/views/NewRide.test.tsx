@@ -18,11 +18,18 @@ vi.mock('../lib/app', () => ({
 
 import NewRide from './NewRide'
 import { listRides } from '../storage'
+import { renderWithRouter } from '../../test/router'
+
+function mount() {
+  const wrap = renderWithRouter(<NewRide />, '/new')
+  render(wrap.ui)
+  return wrap
+}
 
 describe('NewRide', () => {
   it('save button is disabled until all fields are filled', async () => {
     geocode.mockReset()
-    render(<NewRide onNavigate={vi.fn()} />)
+    mount()
     expect(screen.getByRole('button', { name: 'Save ride' })).toBeDisabled()
     await userEvent.type(screen.getByPlaceholderText('123 Home Street'), 'Home')
     await userEvent.type(screen.getByPlaceholderText('456 School Road'), 'School')
@@ -32,7 +39,7 @@ describe('NewRide', () => {
   })
 
   it('toggles a day off and back on', async () => {
-    render(<NewRide onNavigate={vi.fn()} />)
+    mount()
     const mon = screen.getByRole('button', { name: 'Mon' })
     expect(mon).toHaveAttribute('aria-pressed', 'true')
     await userEvent.click(mon)
@@ -57,14 +64,13 @@ describe('NewRide', () => {
       durationSeconds: 240,
     })
 
-    const onNavigate = vi.fn()
-    render(<NewRide onNavigate={onNavigate} />)
+    const wrap = mount()
     await userEvent.type(screen.getByPlaceholderText('123 Home Street'), 'Home')
     await userEvent.type(screen.getByPlaceholderText('456 School Road'), 'School')
     await userEvent.type(screen.getByPlaceholderText('e.g. Alex Smith'), 'Alex')
     await userEvent.click(screen.getByRole('button', { name: 'Save ride' }))
 
-    await waitFor(() => expect(onNavigate).toHaveBeenCalledWith({ name: 'home' }))
+    await waitFor(() => expect(wrap.location()).toBe('/'))
     expect(firstMatch).toHaveBeenCalledTimes(2)
     expect(fetchRoute).toHaveBeenCalledTimes(1)
     const rides = listRides()
@@ -88,13 +94,12 @@ describe('NewRide', () => {
     firstMatch.mockReset()
     firstMatch.mockResolvedValue(null)
     fetchRoute.mockReset()
-    const onNavigate = vi.fn()
-    render(<NewRide onNavigate={onNavigate} />)
+    const wrap = mount()
     await userEvent.type(screen.getByPlaceholderText('123 Home Street'), 'X')
     await userEvent.type(screen.getByPlaceholderText('456 School Road'), 'Y')
     await userEvent.type(screen.getByPlaceholderText('e.g. Alex Smith'), 'A')
     await userEvent.click(screen.getByRole('button', { name: 'Save ride' }))
-    await waitFor(() => expect(onNavigate).toHaveBeenCalled())
+    await waitFor(() => expect(wrap.location()).toBe('/'))
     expect(listRides()[0]).toMatchObject({ pickupCoord: null, dropoffCoord: null })
     expect(listRides()[0].routePolyline).toBeUndefined()
     expect(fetchRoute).not.toHaveBeenCalled()
@@ -105,35 +110,32 @@ describe('NewRide', () => {
     firstMatch.mockResolvedValue({ lat: 1, lng: 2 })
     fetchRoute.mockReset()
     fetchRoute.mockRejectedValueOnce(new Error('OSRM down'))
-    const onNavigate = vi.fn()
-    render(<NewRide onNavigate={onNavigate} />)
+    const wrap = mount()
     await userEvent.type(screen.getByPlaceholderText('123 Home Street'), 'X')
     await userEvent.type(screen.getByPlaceholderText('456 School Road'), 'Y')
     await userEvent.type(screen.getByPlaceholderText('e.g. Alex Smith'), 'A')
     await userEvent.click(screen.getByRole('button', { name: 'Save ride' }))
-    await waitFor(() => expect(onNavigate).toHaveBeenCalled())
+    await waitFor(() => expect(wrap.location()).toBe('/'))
     expect(listRides()[0].routePolyline).toBeUndefined()
   })
 
   it('surfaces an error and stays on the form when geocode rejects', async () => {
     firstMatch.mockReset()
     firstMatch.mockRejectedValue(new Error('Nominatim down'))
-    const onNavigate = vi.fn()
-    render(<NewRide onNavigate={onNavigate} />)
+    const wrap = mount()
     await userEvent.type(screen.getByPlaceholderText('123 Home Street'), 'X')
     await userEvent.type(screen.getByPlaceholderText('456 School Road'), 'Y')
     await userEvent.type(screen.getByPlaceholderText('e.g. Alex Smith'), 'A')
     await userEvent.click(screen.getByRole('button', { name: 'Save ride' }))
     await waitFor(() => expect(screen.getByText('Nominatim down')).toBeInTheDocument())
-    expect(onNavigate).not.toHaveBeenCalled()
+    expect(wrap.location()).toBe('/new')
     expect(listRides()).toHaveLength(0)
   })
 
   it('Cancel navigates home without saving', async () => {
-    const onNavigate = vi.fn()
-    render(<NewRide onNavigate={onNavigate} />)
+    const wrap = mount()
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-    expect(onNavigate).toHaveBeenCalledWith({ name: 'home' })
+    expect(wrap.location()).toBe('/')
     expect(listRides()).toHaveLength(0)
   })
 })

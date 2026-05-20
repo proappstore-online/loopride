@@ -1,16 +1,18 @@
-import type { Role, View } from '../types'
+import { useLocation } from 'wouter'
+import type { Role } from '../types'
 import { setRole } from '../lib/mode'
 
 interface RoleToggleProps {
   role: Role
-  onNavigate: (view: View) => void
 }
 
-export default function RoleToggle({ role, onNavigate }: RoleToggleProps) {
+export default function RoleToggle({ role }: RoleToggleProps) {
+  const [, setLocation] = useLocation()
+
   const switchTo = (next: Role) => {
     if (next === role) return
     setRole(next)
-    onNavigate(next === 'driver' ? { name: 'driver-home' } : { name: 'home' })
+    setLocation(next === 'driver' ? '/driver' : '/')
   }
 
   return (
