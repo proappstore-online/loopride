@@ -4,6 +4,22 @@ import { EVENTS, STORAGE_KEYS } from './lib/constants'
 
 const RIDES_KEY = STORAGE_KEYS.rides
 const OWNER_KEY = STORAGE_KEYS.ridesOwner
+const LEGACY_RIDES_KEY_V1 = 'loopride.rides.v1'
+
+/**
+ * One-time migration: pre-rename data lived at loopride.rides.v1. Move it
+ * over if we find it and the new key is empty. Safe to leave running — it's
+ * a no-op after the first import.
+ */
+function migrateLegacy(): void {
+  if (typeof localStorage === 'undefined') return
+  const legacy = localStorage.getItem(LEGACY_RIDES_KEY_V1)
+  if (!legacy) return
+  if (!localStorage.getItem(RIDES_KEY)) {
+    localStorage.setItem(RIDES_KEY, legacy)
+  }
+  localStorage.removeItem(LEGACY_RIDES_KEY_V1)
+}
 
 function emitChanged(): void {
   if (typeof window !== 'undefined') {
@@ -13,6 +29,7 @@ function emitChanged(): void {
 
 export function listRides(): RecurringRide[] {
   try {
+    migrateLegacy()
     const raw = localStorage.getItem(RIDES_KEY)
     return raw ? (JSON.parse(raw) as RecurringRide[]) : []
   } catch {

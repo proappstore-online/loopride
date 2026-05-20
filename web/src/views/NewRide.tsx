@@ -12,7 +12,25 @@ interface NewRideProps {
 interface GeoSuggestion {
   lat: number
   lng: number
+  /** Full Nominatim display name — what we show in the dropdown. */
   displayName: string
+  /** Short label suitable for the input field after selection. */
+  shortName: string
+}
+
+/**
+ * Nominatim displayName tends to be a 10-segment comma-separated address.
+ * For an input field we want something usable: the POI name if there is one
+ * (first segment), or "<house-number> <street>" when the first segment is
+ * a bare number.
+ */
+function shortNameFor(displayName: string): string {
+  const parts = displayName.split(',').map((p) => p.trim()).filter(Boolean)
+  if (parts.length === 0) return displayName
+  if (parts.length > 1 && /^\d+[a-z]?$/i.test(parts[0])) {
+    return `${parts[0]} ${parts[1]}`
+  }
+  return parts[0]
 }
 
 export default function NewRide({ onNavigate }: NewRideProps) {
@@ -226,7 +244,12 @@ function AddressInput({
         const results = await app.maps.geocode(q, 5)
         if (!cancelled) {
           setSuggestions(
-            results.map((r) => ({ lat: r.lat, lng: r.lng, displayName: r.displayName })),
+            results.map((r) => ({
+              lat: r.lat,
+              lng: r.lng,
+              displayName: r.displayName,
+              shortName: shortNameFor(r.displayName),
+            })),
           )
         }
       } catch {
@@ -273,12 +296,17 @@ function AddressInput({
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => {
-                  onSelect(s.displayName, { lat: s.lat, lng: s.lng })
+                  onSelect(s.shortName, { lat: s.lat, lng: s.lng })
                   setOpen(false)
+                  setSuggestions([])
                 }}
                 className="block w-full px-4 py-2 text-left text-xs text-[var(--ink)] hover:bg-[var(--accent-soft)]"
+                title={s.displayName}
               >
-                {s.displayName}
+                <span className="block font-medium">{s.shortName}</span>
+                <span className="block truncate text-[10px] text-[var(--muted)]">
+                  {s.displayName}
+                </span>
               </button>
             </li>
           ))}

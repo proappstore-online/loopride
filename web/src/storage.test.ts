@@ -61,7 +61,27 @@ describe('storage', () => {
   })
 
   it('listRides recovers from corrupt JSON in localStorage', () => {
-    localStorage.setItem('loopride.rides.v1', '{not json')
+    localStorage.setItem('loopride.rides.v2', '{not json')
     expect(listRides()).toEqual([])
+  })
+
+  it('migrates v1 → v2 storage key on first read', () => {
+    const r = ride()
+    localStorage.setItem('loopride.rides.v1', JSON.stringify([r]))
+    // v2 starts empty.
+    expect(localStorage.getItem('loopride.rides.v2')).toBeNull()
+    expect(listRides()).toEqual([r])
+    // After migration, v1 is gone and v2 holds the data.
+    expect(localStorage.getItem('loopride.rides.v1')).toBeNull()
+    expect(JSON.parse(localStorage.getItem('loopride.rides.v2') ?? '[]')).toEqual([r])
+  })
+
+  it('migration does not overwrite existing v2 data', () => {
+    const v1 = ride({ pickup: 'old' })
+    const v2 = ride({ pickup: 'new' })
+    localStorage.setItem('loopride.rides.v1', JSON.stringify([v1]))
+    localStorage.setItem('loopride.rides.v2', JSON.stringify([v2]))
+    expect(listRides().map((r) => r.pickup)).toEqual(['new'])
+    expect(localStorage.getItem('loopride.rides.v1')).toBeNull()
   })
 })

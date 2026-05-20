@@ -6,7 +6,7 @@ import {
   listRides,
   setLocalRidesOwner,
 } from '../storage'
-import { EVENTS, KV_KEYS } from './constants'
+import { EVENTS, KV_KEYS, STORAGE_KEYS } from './constants'
 import type { RecurringRide } from '../types'
 
 /**
@@ -33,7 +33,7 @@ export async function syncRides(): Promise<void> {
   try {
     const remote = await app.kv.get<RecurringRide[]>(KV_KEYS.rides)
     if (Array.isArray(remote) && remote.length > 0) {
-      localStorage.setItem('loopride.rides.v2', JSON.stringify(remote))
+      localStorage.setItem(STORAGE_KEYS.rides, JSON.stringify(remote))
       setLocalRidesOwner(user.id)
       window.dispatchEvent(new Event(EVENTS.ridesChanged))
       return
