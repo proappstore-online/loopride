@@ -3,6 +3,7 @@ import type { LatLng, RecurringRide, View } from '../types'
 import { getRide } from '../storage'
 import { useWakeLock } from '../lib/useWakeLock'
 import { openTransport, type Transport, type TransportKind } from '../lib/transport'
+import { interpolate } from '../lib/geo'
 import TripMap from './TripMap'
 
 interface DriverTripProps {
@@ -11,11 +12,6 @@ interface DriverTripProps {
 }
 
 type Phase = 'pre' | 'driving' | 'arrived' | 'done'
-
-function interpolate(a: LatLng, b: LatLng, t: number): LatLng {
-  const c = Math.max(0, Math.min(1, t))
-  return { lat: a.lat + (b.lat - a.lat) * c, lng: a.lng + (b.lng - a.lng) * c }
-}
 
 export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
   const [ride, setRide] = useState<RecurringRide | undefined>(undefined)
@@ -35,8 +31,10 @@ export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
     setRide(getRide(rideId))
   }, [rideId])
 
+  const active = phase === 'driving' || phase === 'arrived'
+
   useEffect(() => {
-    if (phase === 'pre' || phase === 'done') return
+    if (!active) return
     const t = openTransport(rideId)
     transportRef.current = t
     setTransportKind(t.kind)
@@ -44,7 +42,7 @@ export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
       t.close()
       transportRef.current = null
     }
-  }, [phase, rideId])
+  }, [active, rideId])
 
   useEffect(() => {
     if (phase !== 'driving') return

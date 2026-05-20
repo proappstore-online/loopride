@@ -41,6 +41,13 @@ describe('share', () => {
     expect(decodeShareHash('#ride=' + garbage)).toBeNull()
   })
 
+  it('round-trips UTF-8 characters in addresses (emoji + accents)', () => {
+    const utf8Ride = { ...ride, pickup: '東京タワー 🗼', dropoff: 'Café — Zürich' }
+    const url = encodeShareUrl(utf8Ride, 'http://example.test/')
+    const hash = '#' + url.split('#')[1]
+    expect(decodeShareHash(hash)).toEqual(utf8Ride)
+  })
+
   it('clearShareHash removes only the #ride= hash', () => {
     history.replaceState(null, '', window.location.pathname + '#ride=abc')
     clearShareHash()

@@ -4,6 +4,7 @@ import { DAYS } from '../types'
 import { getRide } from '../storage'
 import { openTransport, type DriverPing, type TransportKind } from '../lib/transport'
 import { encodeShareUrl } from '../lib/share'
+import { interpolate } from '../lib/geo'
 import TripMap from './TripMap'
 
 const TOTAL_ETA = 8
@@ -63,17 +64,14 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
 
   const driverPosition = useMemo<LatLng | null>(() => {
     if (!ride?.pickupCoord || !ride.dropoffCoord) return null
-    if (liveFeed && lastPing) return lastPing.position
+    // Real-feed positions win even when stale — last-known location is more
+    // useful than a fake interpolation that snaps the dot back to pickup.
+    if (lastPing) return lastPing.position
     if (status === 'scheduled') return null
     if (status === 'completed') return null
     if (status === 'arrived') return ride.dropoffCoord
-    const progress = (TOTAL_ETA - eta) / TOTAL_ETA
-    const t = Math.max(0, Math.min(1, progress))
-    return {
-      lat: ride.pickupCoord.lat + (ride.dropoffCoord.lat - ride.pickupCoord.lat) * t,
-      lng: ride.pickupCoord.lng + (ride.dropoffCoord.lng - ride.pickupCoord.lng) * t,
-    }
-  }, [ride, status, eta, lastPing, liveFeed])
+    return interpolate(ride.pickupCoord, ride.dropoffCoord, (TOTAL_ETA - eta) / TOTAL_ETA)
+  }, [ride, status, eta, lastPing])
 
   if (!ride) {
     return (
@@ -154,6 +152,14 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
             <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--success)]">
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--success)]" />
               Live · {lastPingAge}s ago
+            </span>
+          ) : lastPing ? (
+            <span
+              className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--error)]"
+              title="Live feed has gone quiet. Showing last known driver position."
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-[var(--error)]" />
+              Last seen {lastPingAge}s ago
             </span>
           ) : (
             <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">

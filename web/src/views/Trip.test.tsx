@@ -92,6 +92,28 @@ describe('Trip', () => {
     expect(screen.getByText('No live feed')).toBeInTheDocument()
   })
 
+  it('stale ping keeps the dot at last known position (no snap back)', async () => {
+    saveRide(ride)
+    render(<Trip rideId="ride-trip" onNavigate={vi.fn()} />)
+
+    await act(async () => {
+      publish({
+        rideId: 'ride-trip',
+        position: { lat: 0.7, lng: 0.7 },
+        speedMps: 10,
+        accuracyM: 5,
+        status: 'en-route',
+        at: Date.now() - 60_000, // older than REAL_FEED_TIMEOUT_MS (15s)
+      })
+      await tick()
+    })
+
+    expect(screen.getByText(/Last seen/)).toBeInTheDocument()
+    expect(screen.queryByText(/Live · /)).not.toBeInTheDocument()
+    // Dot stays at the last broadcast position rather than interpolating to pickup.
+    expect(screen.getByTestId('trip-map').dataset.driver).toBe('0.7,0.7')
+  })
+
   it('arrived ping moves status to arrived', async () => {
     saveRide(ride)
     render(<Trip rideId="ride-trip" onNavigate={vi.fn()} />)

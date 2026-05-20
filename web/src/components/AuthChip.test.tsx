@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { User } from '@proappstore/sdk/hooks'
 import AuthChip from './AuthChip'
+
+const user: User = {
+  id: 'u1',
+  login: 'sergey',
+  avatarUrl: null,
+} as User
 
 describe('AuthChip', () => {
   it('shows ellipsis while loading', () => {
@@ -31,14 +38,7 @@ describe('AuthChip', () => {
 
   it('shows user handle + Sign out when signed in', async () => {
     const onSignOut = vi.fn()
-    render(
-      <AuthChip
-        loading={false}
-        user={{ uid: 'u1', login: 'sergey', name: 'Sergey', avatarUrl: '' } as never}
-        onSignIn={vi.fn()}
-        onSignOut={onSignOut}
-      />,
-    )
+    render(<AuthChip loading={false} user={user} onSignIn={vi.fn()} onSignOut={onSignOut} />)
     expect(screen.getByText('@sergey')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Sign out' }))
     expect(onSignOut).toHaveBeenCalled()

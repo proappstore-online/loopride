@@ -2,8 +2,13 @@
   "name": "loopride",
   "private": true,
   "packageManager": "pnpm@10.30.3",
-  "engines": { "node": ">=22" },
-  "repository": { "type": "git", "url": "git+https://github.com/proappstore-online/loopride.git" },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/proappstore-online/loopride.git"
+  },
   "scripts": {
     "dev": "pnpm --filter @loopride/web dev",
     "build": "pnpm --filter @loopride/web build",
@@ -13,5 +18,8 @@
     "test:watch": "pnpm --filter @loopride/web test:watch",
     "test:coverage": "pnpm --filter @loopride/web test:coverage",
     "test:e2e": "pnpm --filter @loopride/web test:e2e"
+  },
+  "devDependencies": {
+    "vite-plugin-pwa": "^1.3.0"
   }
 }
