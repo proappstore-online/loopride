@@ -9,6 +9,7 @@ import DriverTrip from './views/DriverTrip'
 import { getRole, setRole } from './lib/mode'
 import { clearShareHash, decodeShareHash } from './lib/share'
 import { saveRide } from './storage'
+import { useRideSync } from './lib/rideSync'
 
 function consumeShareHash(): View | null {
   if (typeof window === 'undefined') return null
@@ -29,6 +30,8 @@ function initialView(): View {
 
 export default function App() {
   const [view, setView] = useState<View>(initialView)
+
+  useRideSync()
 
   useEffect(() => {
     // No-op on first paint, but ensures share-hash handling re-runs if the

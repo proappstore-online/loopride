@@ -17,6 +17,9 @@ export default function Home({ onNavigate }: HomeProps) {
 
   useEffect(() => {
     setRides(listRides())
+    const onSync = () => setRides(listRides())
+    window.addEventListener('loopride:rides-synced', onSync)
+    return () => window.removeEventListener('loopride:rides-synced', onSync)
   }, [])
 
   const togglePause = (ride: RecurringRide) => {

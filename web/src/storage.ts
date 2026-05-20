@@ -1,4 +1,5 @@
 import type { RecurringRide } from './types'
+import { pushRides } from './lib/rideSync'
 
 const KEY = 'loopride.rides.v1'
 
@@ -17,11 +18,13 @@ export function saveRide(ride: RecurringRide): void {
   if (idx >= 0) rides[idx] = ride
   else rides.unshift(ride)
   localStorage.setItem(KEY, JSON.stringify(rides))
+  pushRides(rides)
 }
 
 export function deleteRide(id: string): void {
   const rides = listRides().filter((r) => r.id !== id)
   localStorage.setItem(KEY, JSON.stringify(rides))
+  pushRides(rides)
 }
 
 export function getRide(id: string): RecurringRide | undefined {

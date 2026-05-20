@@ -3,7 +3,13 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 const { geocode } = vi.hoisted(() => ({ geocode: vi.fn() }))
-vi.mock('../lib/app', () => ({ app: { maps: { geocode } } }))
+vi.mock('../lib/app', () => ({
+  app: {
+    maps: { geocode },
+    auth: { token: null, onChange: () => () => undefined },
+    kv: { set: vi.fn(), get: vi.fn() },
+  },
+}))
 
 import NewRide from './NewRide'
 import { listRides } from '../storage'
