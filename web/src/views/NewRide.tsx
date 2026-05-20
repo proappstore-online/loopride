@@ -1,16 +1,25 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { DayOfWeek, LatLng, RecurringRide, View } from '../types'
 import { DAYS } from '../types'
 import { saveRide } from '../storage'
 import { app } from '../lib/app'
+import { LIMITS } from '../lib/constants'
 
 interface NewRideProps {
   onNavigate: (view: View) => void
 }
 
+interface GeoSuggestion {
+  lat: number
+  lng: number
+  displayName: string
+}
+
 export default function NewRide({ onNavigate }: NewRideProps) {
   const [pickup, setPickup] = useState('')
+  const [pickupCoord, setPickupCoord] = useState<LatLng | null>(null)
   const [dropoff, setDropoff] = useState('')
+  const [dropoffCoord, setDropoffCoord] = useState<LatLng | null>(null)
   const [days, setDays] = useState<DayOfWeek[]>(['mon', 'tue', 'wed', 'thu', 'fri'])
   const [time, setTime] = useState('08:00')
   const [driverName, setDriverName] = useState('')
@@ -23,7 +32,8 @@ export default function NewRide({ onNavigate }: NewRideProps) {
 
   const valid = pickup.trim() && dropoff.trim() && driverName.trim() && days.length > 0
 
-  const firstResult = async (q: string): Promise<LatLng | null> => {
+  const ensureCoord = async (q: string, picked: LatLng | null): Promise<LatLng | null> => {
+    if (picked) return picked
     const results = await app.maps.geocode(q, 1)
     return results[0] ? { lat: results[0].lat, lng: results[0].lng } : null
   }
@@ -34,19 +44,22 @@ export default function NewRide({ onNavigate }: NewRideProps) {
     setSaving(true)
     setError(null)
     try {
-      const [pickupCoord, dropoffCoord] = await Promise.all([
-        firstResult(pickup.trim()),
-        firstResult(dropoff.trim()),
+      const trimmedPickup = pickup.trim().slice(0, LIMITS.pickupChars)
+      const trimmedDropoff = dropoff.trim().slice(0, LIMITS.dropoffChars)
+      const trimmedDriver = driverName.trim().slice(0, LIMITS.driverNameChars)
+      const [resolvedPickup, resolvedDropoff] = await Promise.all([
+        ensureCoord(trimmedPickup, pickupCoord),
+        ensureCoord(trimmedDropoff, dropoffCoord),
       ])
       const ride: RecurringRide = {
         id: crypto.randomUUID(),
-        pickup: pickup.trim(),
-        pickupCoord,
-        dropoff: dropoff.trim(),
-        dropoffCoord,
+        pickup: trimmedPickup,
+        pickupCoord: resolvedPickup,
+        dropoff: trimmedDropoff,
+        dropoffCoord: resolvedDropoff,
         days,
         time,
-        driverName: driverName.trim(),
+        driverName: trimmedDriver,
         paused: false,
         createdAt: Date.now(),
       }
@@ -72,22 +85,36 @@ export default function NewRide({ onNavigate }: NewRideProps) {
 
       <form onSubmit={submit} className="space-y-6">
         <Field label="Pickup">
-          <input
-            type="text"
+          <AddressInput
             value={pickup}
-            onChange={(e) => setPickup(e.target.value)}
+            onChange={(v) => {
+              setPickup(v)
+              setPickupCoord(null)
+            }}
+            onSelect={(displayName, coord) => {
+              setPickup(displayName)
+              setPickupCoord(coord)
+            }}
             placeholder="123 Home Street"
-            className="w-full rounded-xl border border-[var(--line)] bg-[var(--paper)] px-4 py-2.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+            maxLength={LIMITS.pickupChars}
+            testIdPrefix="pickup"
           />
         </Field>
 
         <Field label="Dropoff">
-          <input
-            type="text"
+          <AddressInput
             value={dropoff}
-            onChange={(e) => setDropoff(e.target.value)}
+            onChange={(v) => {
+              setDropoff(v)
+              setDropoffCoord(null)
+            }}
+            onSelect={(displayName, coord) => {
+              setDropoff(displayName)
+              setDropoffCoord(coord)
+            }}
             placeholder="456 School Road"
-            className="w-full rounded-xl border border-[var(--line)] bg-[var(--paper)] px-4 py-2.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+            maxLength={LIMITS.dropoffChars}
+            testIdPrefix="dropoff"
           />
         </Field>
 
@@ -130,6 +157,7 @@ export default function NewRide({ onNavigate }: NewRideProps) {
           <input
             type="text"
             value={driverName}
+            maxLength={LIMITS.driverNameChars}
             onChange={(e) => setDriverName(e.target.value)}
             placeholder="e.g. Alex Smith"
             className="w-full rounded-xl border border-[var(--line)] bg-[var(--paper)] px-4 py-2.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
@@ -151,7 +179,7 @@ export default function NewRide({ onNavigate }: NewRideProps) {
             disabled={!valid || saving}
             className="rounded-2xl bg-[var(--accent)] px-6 py-2.5 text-sm font-semibold text-white disabled:opacity-40"
           >
-            {saving ? 'Geocoding…' : 'Save ride'}
+            {saving ? 'Saving…' : 'Save ride'}
           </button>
           <button
             type="button"
@@ -162,6 +190,100 @@ export default function NewRide({ onNavigate }: NewRideProps) {
           </button>
         </div>
       </form>
+    </div>
+  )
+}
+
+function AddressInput({
+  value,
+  onChange,
+  onSelect,
+  placeholder,
+  maxLength,
+  testIdPrefix,
+}: {
+  value: string
+  onChange: (v: string) => void
+  onSelect: (displayName: string, coord: LatLng) => void
+  placeholder: string
+  maxLength: number
+  testIdPrefix: string
+}) {
+  const [suggestions, setSuggestions] = useState<GeoSuggestion[]>([])
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    const q = value.trim()
+    if (q.length < 3) {
+      setSuggestions([])
+      return
+    }
+    let cancelled = false
+    const handle = setTimeout(async () => {
+      setLoading(true)
+      try {
+        const results = await app.maps.geocode(q, 5)
+        if (!cancelled) {
+          setSuggestions(
+            results.map((r) => ({ lat: r.lat, lng: r.lng, displayName: r.displayName })),
+          )
+        }
+      } catch {
+        if (!cancelled) setSuggestions([])
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }, 300)
+    return () => {
+      cancelled = true
+      clearTimeout(handle)
+    }
+  }, [value])
+
+  return (
+    <div className="relative">
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value)
+          setOpen(true)
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder={placeholder}
+        maxLength={maxLength}
+        autoComplete="off"
+        aria-autocomplete="list"
+        data-testid={`${testIdPrefix}-input`}
+        className="w-full rounded-xl border border-[var(--line)] bg-[var(--paper)] px-4 py-2.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+      />
+      {open && (loading || suggestions.length > 0) && (
+        <ul
+          data-testid={`${testIdPrefix}-suggestions`}
+          className="absolute z-10 mt-1 max-h-60 w-full overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper)] shadow-lg"
+        >
+          {loading && suggestions.length === 0 && (
+            <li className="px-4 py-2 text-xs text-[var(--muted)]">Searching…</li>
+          )}
+          {suggestions.map((s, i) => (
+            <li key={i}>
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  onSelect(s.displayName, { lat: s.lat, lng: s.lng })
+                  setOpen(false)
+                }}
+                className="block w-full px-4 py-2 text-left text-xs text-[var(--ink)] hover:bg-[var(--accent-soft)]"
+              >
+                {s.displayName}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

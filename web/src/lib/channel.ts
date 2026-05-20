@@ -1,4 +1,5 @@
 import type { LatLng } from '../types'
+import { BROADCAST_CHANNEL } from './constants'
 
 export interface DriverPing {
   rideId: string
@@ -9,7 +10,7 @@ export interface DriverPing {
   at: number
 }
 
-const CHANNEL = 'loopride.driver-position.v1'
+const CHANNEL = BROADCAST_CHANNEL
 
 export function publish(ping: DriverPing): void {
   const ch = new BroadcastChannel(CHANNEL)

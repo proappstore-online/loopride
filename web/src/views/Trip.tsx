@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import type { LatLng, RecurringRide, View } from '../types'
 import { DAYS } from '../types'
 import { getRide } from '../storage'
 import { openTransport, type DriverPing, type TransportKind } from '../lib/transport'
 import { encodeShareUrl } from '../lib/share'
 import { interpolate } from '../lib/geo'
-import TripMap from './TripMap'
+import { LIVE_FEED_TIMEOUT_MS } from '../lib/constants'
 
+const TripMap = lazy(() => import('./TripMap'))
 const TOTAL_ETA = 8
-const REAL_FEED_TIMEOUT_MS = 15_000
 
 interface TripProps {
   rideId: string
@@ -24,7 +24,7 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
   const [lastPing, setLastPing] = useState<DriverPing | null>(null)
   const [transportKind, setTransportKind] = useState<TransportKind | null>(null)
   const [copied, setCopied] = useState(false)
-  const [, setNow] = useState(Date.now())
+  const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
     setRide(getRide(rideId))
@@ -60,7 +60,7 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
     if (status === 'en-route' && eta === 0 && !lastPing) setStatus('arrived')
   }, [status, eta, lastPing])
 
-  const liveFeed = lastPing !== null && Date.now() - lastPing.at < REAL_FEED_TIMEOUT_MS
+  const liveFeed = lastPing !== null && now - lastPing.at < LIVE_FEED_TIMEOUT_MS
 
   const driverPosition = useMemo<LatLng | null>(() => {
     if (!ride?.pickupCoord || !ride.dropoffCoord) return null
@@ -87,7 +87,7 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
     )
   }
 
-  const lastPingAge = lastPing ? Math.round((Date.now() - lastPing.at) / 1000) : null
+  const lastPingAge = lastPing ? Math.round((now - lastPing.at) / 1000) : null
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-8">
@@ -102,11 +102,19 @@ export default function Trip({ rideId, onNavigate }: TripProps) {
       </header>
 
       <section className="mb-4">
-        <TripMap
-          pickup={ride.pickupCoord}
-          dropoff={ride.dropoffCoord}
-          driver={driverPosition}
-        />
+        <Suspense
+          fallback={
+            <div className="flex h-72 items-center justify-center rounded-3xl border border-[var(--line)] bg-[var(--accent-soft)] text-xs text-[var(--muted)]">
+              Loading map…
+            </div>
+          }
+        >
+          <TripMap
+            pickup={ride.pickupCoord}
+            dropoff={ride.dropoffCoord}
+            driver={driverPosition}
+          />
+        </Suspense>
       </section>
 
       <section className="rounded-3xl border border-[var(--line)] p-6">

@@ -1,6 +1,7 @@
 import type { RecurringRide } from '../types'
+import { HASH } from './constants'
 
-const PREFIX = '#ride='
+const PREFIX = HASH.ride
 
 function toBase64Url(s: string): string {
   const bytes = new TextEncoder().encode(s)

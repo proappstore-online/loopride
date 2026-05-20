@@ -1,10 +1,9 @@
-import { useEffect, useState } from 'react'
-import type { RecurringRide, View } from '../types'
+import type { View } from '../types'
 import { DAYS } from '../types'
-import { listRides } from '../storage'
 import RoleToggle from '../components/RoleToggle'
 import AuthChip from '../components/AuthChip'
 import { useAuth } from '../lib/useAuth'
+import { useRideList } from '../lib/useRideList'
 import { app } from '../lib/app'
 
 interface DriverHomeProps {
@@ -13,14 +12,7 @@ interface DriverHomeProps {
 
 export default function DriverHome({ onNavigate }: DriverHomeProps) {
   const auth = useAuth()
-  const [rides, setRides] = useState<RecurringRide[]>([])
-
-  useEffect(() => {
-    setRides(listRides())
-    const onSync = () => setRides(listRides())
-    window.addEventListener('loopride:rides-synced', onSync)
-    return () => window.removeEventListener('loopride:rides-synced', onSync)
-  }, [])
+  const rides = useRideList()
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-8">

@@ -99,6 +99,9 @@ export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
       mapRef.current?.remove()
       mapRef.current = null
     }
+    // Map is set up once on mount; subsequent pickup/dropoff/driver changes
+    // are handled by the per-prop effects below to avoid tearing down the map.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -130,6 +133,9 @@ export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
       bounds.extend([dropoff.lng, dropoff.lat])
       map.fitBounds(bounds, { padding: 60, duration: 0, maxZoom: 14 })
     }
+    // Deps intentionally listed by field so an unrelated property change on
+    // pickup/dropoff doesn't refit the bounds.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng])
 
   useEffect(() => {
@@ -147,6 +153,8 @@ export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
     } else {
       driverMarker.current.setLngLat([driver.lng, driver.lat])
     }
+    // Driver dot updates on coord change only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [driver?.lat, driver?.lng])
 
   if (!pickup || !dropoff) {

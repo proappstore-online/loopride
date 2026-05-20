@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react'
 import type { RecurringRide, View } from '../types'
 import { DAYS } from '../types'
-import { deleteRide, listRides, saveRide } from '../storage'
+import { deleteRide, saveRide } from '../storage'
 import RoleToggle from '../components/RoleToggle'
 import AuthChip from '../components/AuthChip'
 import { useAuth } from '../lib/useAuth'
+import { useRideList } from '../lib/useRideList'
 import { app } from '../lib/app'
 
 interface HomeProps {
@@ -13,24 +13,10 @@ interface HomeProps {
 
 export default function Home({ onNavigate }: HomeProps) {
   const auth = useAuth()
-  const [rides, setRides] = useState<RecurringRide[]>([])
-
-  useEffect(() => {
-    setRides(listRides())
-    const onSync = () => setRides(listRides())
-    window.addEventListener('loopride:rides-synced', onSync)
-    return () => window.removeEventListener('loopride:rides-synced', onSync)
-  }, [])
+  const rides = useRideList()
 
   const togglePause = (ride: RecurringRide) => {
-    const next = { ...ride, paused: !ride.paused }
-    saveRide(next)
-    setRides(listRides())
-  }
-
-  const remove = (id: string) => {
-    deleteRide(id)
-    setRides(listRides())
+    saveRide({ ...ride, paused: !ride.paused })
   }
 
   return (
@@ -111,7 +97,7 @@ export default function Home({ onNavigate }: HomeProps) {
                   {ride.paused ? 'Resume' : 'Pause'}
                 </button>
                 <button
-                  onClick={() => remove(ride.id)}
+                  onClick={() => deleteRide(ride.id)}
                   className="rounded-xl border border-[var(--line)] px-3 py-1 text-xs font-medium text-[var(--error)] hover:bg-[var(--accent-soft)]"
                 >
                   Delete

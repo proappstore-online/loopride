@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import type { LatLng, RecurringRide, View } from '../types'
 import { getRide } from '../storage'
 import { useWakeLock } from '../lib/useWakeLock'
 import { openTransport, type Transport, type TransportKind } from '../lib/transport'
 import { interpolate } from '../lib/geo'
-import TripMap from './TripMap'
+
+const TripMap = lazy(() => import('./TripMap'))
 
 interface DriverTripProps {
   rideId: string
@@ -145,11 +146,19 @@ export default function DriverTrip({ rideId, onNavigate }: DriverTripProps) {
       </header>
 
       <section className="mb-4">
-        <TripMap
-          pickup={ride.pickupCoord}
-          dropoff={ride.dropoffCoord}
-          driver={phase === 'driving' || phase === 'arrived' ? broadcastPos : null}
-        />
+        <Suspense
+          fallback={
+            <div className="flex h-72 items-center justify-center rounded-3xl border border-[var(--line)] bg-[var(--accent-soft)] text-xs text-[var(--muted)]">
+              Loading map…
+            </div>
+          }
+        >
+          <TripMap
+            pickup={ride.pickupCoord}
+            dropoff={ride.dropoffCoord}
+            driver={phase === 'driving' || phase === 'arrived' ? broadcastPos : null}
+          />
+        </Suspense>
       </section>
 
       <section className="rounded-3xl border border-[var(--line)] p-6">
