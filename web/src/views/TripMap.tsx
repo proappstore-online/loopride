@@ -1,7 +1,12 @@
-import { useEffect, useRef } from 'react'
-import maplibregl, { type Map as MapLibreMap, type Marker } from 'maplibre-gl'
+import { useEffect, useRef, useState } from 'react'
+import maplibregl, {
+  type GeoJSONSource,
+  type Map as MapLibreMap,
+  type Marker,
+} from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import type { LatLng } from '../types'
+import { fetchRoute } from '../lib/routing'
 
 interface TripMapProps {
   pickup: LatLng | null
@@ -29,6 +34,8 @@ const OSM_STYLE = {
   ],
 }
 
+const STRAIGHT_LINE_DASH: number[] = [2, 1.5]
+
 function makeDot(color: string, ring = false): HTMLElement {
   const el = document.createElement('div')
   el.style.width = '18px'
@@ -43,12 +50,21 @@ function makeDot(color: string, ring = false): HTMLElement {
   return el
 }
 
+function straightLine(pickup: LatLng, dropoff: LatLng): [number, number][] {
+  return [
+    [pickup.lng, pickup.lat],
+    [dropoff.lng, dropoff.lat],
+  ]
+}
+
 export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<MapLibreMap | null>(null)
+  const mapLoaded = useRef(false)
   const pickupMarker = useRef<Marker | null>(null)
   const dropoffMarker = useRef<Marker | null>(null)
   const driverMarker = useRef<Marker | null>(null)
+  const [routeIsReal, setRouteIsReal] = useState(false)
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return
@@ -57,53 +73,50 @@ export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
       : dropoff
         ? [dropoff.lng, dropoff.lat]
         : [151.2093, -33.8688]
-    mapRef.current = new maplibregl.Map({
+    const map = new maplibregl.Map({
       container: containerRef.current,
       style: OSM_STYLE,
       center,
       zoom: 12,
       attributionControl: { compact: true },
     })
+    mapRef.current = map
 
-    mapRef.current.on('load', () => {
-      if (pickup && dropoff && mapRef.current) {
-        mapRef.current.addSource('route', {
-          type: 'geojson',
-          data: {
-            type: 'Feature',
-            properties: {},
-            geometry: {
-              type: 'LineString',
-              coordinates: [
-                [pickup.lng, pickup.lat],
-                [dropoff.lng, dropoff.lat],
-              ],
-            },
+    map.on('load', () => {
+      mapLoaded.current = true
+      map.addSource('route', {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'LineString',
+            coordinates: pickup && dropoff ? straightLine(pickup, dropoff) : [],
           },
-        })
-        mapRef.current.addLayer({
-          id: 'route',
-          type: 'line',
-          source: 'route',
-          paint: {
-            'line-color': '#7c3aed',
-            'line-width': 4,
-            'line-opacity': 0.7,
-            'line-dasharray': [2, 1.5],
-          },
-        })
-      }
+        },
+      })
+      map.addLayer({
+        id: 'route',
+        type: 'line',
+        source: 'route',
+        paint: {
+          'line-color': '#7c3aed',
+          'line-width': 4,
+          'line-opacity': 0.7,
+          'line-dasharray': STRAIGHT_LINE_DASH,
+        },
+      })
     })
 
     return () => {
-      mapRef.current?.remove()
+      map.remove()
       mapRef.current = null
+      mapLoaded.current = false
     }
-    // Map is set up once on mount; subsequent pickup/dropoff/driver changes
-    // are handled by the per-prop effects below to avoid tearing down the map.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Markers + bounds fit
   useEffect(() => {
     const map = mapRef.current
     if (!map) return
@@ -133,11 +146,49 @@ export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
       bounds.extend([dropoff.lng, dropoff.lat])
       map.fitBounds(bounds, { padding: 60, duration: 0, maxZoom: 14 })
     }
-    // Deps intentionally listed by field so an unrelated property change on
-    // pickup/dropoff doesn't refit the bounds.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng])
 
+  // Real route polyline (falls back to straight line on failure)
+  useEffect(() => {
+    if (!pickup || !dropoff) return
+    const map = mapRef.current
+    if (!map) return
+
+    let cancelled = false
+
+    const apply = (coords: [number, number][], isReal: boolean) => {
+      if (cancelled || !map.isStyleLoaded()) return
+      const source = map.getSource('route') as GeoJSONSource | undefined
+      if (!source) return
+      source.setData({
+        type: 'Feature',
+        properties: {},
+        geometry: { type: 'LineString', coordinates: coords },
+      })
+      map.setPaintProperty('route', 'line-dasharray', isReal ? [1, 0] : STRAIGHT_LINE_DASH)
+      setRouteIsReal(isReal)
+    }
+
+    const update = () => {
+      apply(straightLine(pickup, dropoff), false)
+      fetchRoute(pickup, dropoff)
+        .then((route) => apply(route.coordinates, true))
+        .catch(() => {
+          // Keep the straight line we already drew.
+        })
+    }
+
+    if (mapLoaded.current) update()
+    else map.once('load', update)
+
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng])
+
+  // Driver dot
   useEffect(() => {
     const map = mapRef.current
     if (!map) return
@@ -153,7 +204,6 @@ export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
     } else {
       driverMarker.current.setLngLat([driver.lng, driver.lat])
     }
-    // Driver dot updates on coord change only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [driver?.lat, driver?.lng])
 
@@ -166,9 +216,16 @@ export default function TripMap({ pickup, dropoff, driver }: TripMapProps) {
   }
 
   return (
-    <div
-      ref={containerRef}
-      className="h-72 w-full overflow-hidden rounded-3xl border border-[var(--line)]"
-    />
+    <div className="relative">
+      <div
+        ref={containerRef}
+        className="h-72 w-full overflow-hidden rounded-3xl border border-[var(--line)]"
+      />
+      {!routeIsReal && (
+        <p className="pointer-events-none absolute bottom-2 right-2 rounded-md bg-[var(--paper)]/80 px-2 py-0.5 text-[10px] text-[var(--muted)]">
+          straight-line estimate
+        </p>
+      )}
+    </div>
   )
 }
