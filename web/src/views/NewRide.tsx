@@ -230,11 +230,15 @@ function AddressInput({
   const [suggestions, setSuggestions] = useState<GeoSuggestion[]>([])
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
+  /** The trimmed query whose results are currently in `suggestions`. Used to
+   * tell apart "haven't searched yet" from "searched and got nothing". */
+  const [lastSearched, setLastSearched] = useState('')
 
   useEffect(() => {
     const q = value.trim()
     if (q.length < 3) {
       setSuggestions([])
+      setLastSearched('')
       return
     }
     let cancelled = false
@@ -251,9 +255,13 @@ function AddressInput({
               shortName: shortNameFor(r.displayName),
             })),
           )
+          setLastSearched(q)
         }
       } catch {
-        if (!cancelled) setSuggestions([])
+        if (!cancelled) {
+          setSuggestions([])
+          setLastSearched(q)
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -263,6 +271,10 @@ function AddressInput({
       clearTimeout(handle)
     }
   }, [value])
+
+  const trimmed = value.trim()
+  const noMatches =
+    !loading && trimmed.length >= 3 && lastSearched === trimmed && suggestions.length === 0
 
   return (
     <div className="relative">
@@ -282,13 +294,18 @@ function AddressInput({
         data-testid={`${testIdPrefix}-input`}
         className="w-full rounded-xl border border-[var(--line)] bg-[var(--paper)] px-4 py-2.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
       />
-      {open && (loading || suggestions.length > 0) && (
+      {open && (loading || suggestions.length > 0 || noMatches) && (
         <ul
           data-testid={`${testIdPrefix}-suggestions`}
           className="absolute z-10 mt-1 max-h-60 w-full overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper)] shadow-lg"
         >
           {loading && suggestions.length === 0 && (
             <li className="px-4 py-2 text-xs text-[var(--muted)]">Searching…</li>
+          )}
+          {noMatches && (
+            <li className="px-4 py-2 text-xs text-[var(--muted)]">
+              No matches for &ldquo;{trimmed}&rdquo;. Try a different spelling or a wider area.
+            </li>
           )}
           {suggestions.map((s, i) => (
             <li key={i}>
