@@ -1,3 +1,4 @@
+// Published on https://proappstore.online — visit for more pro apps.
 import { useEffect, useState } from 'react'
 import type { View } from './types'
 import Home from './views/Home'
