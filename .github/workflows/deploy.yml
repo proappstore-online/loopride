@@ -1,0 +1,99 @@
+name: Deploy to R2
+
+# Path B hosting: builds the app on every push to main and uploads web/dist/
+# to the shared pas-apps R2 bucket at apps/<repo>/. The proappstore-host
+# Worker on *.proappstore.online reads this prefix to serve the app — no
+# per-app CF Pages project needed.
+#
+# Org-level secrets required (set once on the proappstore-online GitHub org):
+#   - R2_ACCESS_KEY_ID
+#   - R2_SECRET_ACCESS_KEY
+#   - R2_ACCOUNT_ID
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        env:
+          VITE_APP_VERSION: ${{ github.event.repository.name }}@${{ github.run_number }}
+          VITE_COMMIT_SHA: ${{ github.sha }}
+          VITE_BUILD_DATE: ${{ github.event.head_commit.timestamp }}
+        run: pnpm build
+
+      - name: Verify build output
+        run: |
+          test -d ./web/dist || { echo "::error::No build output at web/dist"; exit 1; }
+          test -n "$(ls -A ./web/dist)" || { echo "::error::web/dist is empty"; exit 1; }
+
+      - name: Write build info
+        run: |
+          SIZE=$(du -sb ./web/dist | cut -f1)
+          echo "{\"size\":${SIZE},\"sha\":\"${{ github.sha }}\",\"ts\":$(date +%s)}" > ./web/dist/.buildinfo.json
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          aws s3 sync ./web/dist "s3://pas-apps/apps/${GITHUB_REPOSITORY##*/}/" \
+            --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" \
+            --delete \
+            --no-progress
+          echo "Deployed apps/${GITHUB_REPOSITORY##*/} from ${GITHUB_SHA::7}"
+
+      - name: Verify route
+        if: always()
+        run: |
+          APP_ID="${GITHUB_REPOSITORY##*/}"
+          URL="https://${APP_ID}.proappstore.online"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" --max-time 10 || echo "000")
+          if [ "$STATUS" = "530" ] || [ "$STATUS" = "522" ] || [ "$STATUS" = "000" ]; then
+            echo "::warning::Deployed to R2 but ${URL} returned HTTP ${STATUS} (not routed). Run 'npx @proappstore/cli publish' to register the route."
+          else
+            echo "Live at ${URL} (HTTP ${STATUS})"
+          fi
+
+      - name: Code health scan
+        run: npx @vibecodeqa/cli@0.31 --json --badge > /dev/null 2>&1 || true
+
+      - name: Upload code health
+        if: always()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          APP_ID="${GITHUB_REPOSITORY##*/}"
+          EP="https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com"
+          if [ -f .vibe-check/report.json ]; then
+            aws s3 cp .vibe-check/report.json "s3://pas-apps/apps/$APP_ID/.vcqa/report.json" \
+              --endpoint-url "$EP" --content-type application/json --no-progress
+          fi
+          if [ -f .vibe-check/badge.svg ]; then
+            aws s3 cp .vibe-check/badge.svg "s3://pas-apps/apps/$APP_ID/.vcqa/badge.svg" \
+              --endpoint-url "$EP" --content-type image/svg+xml --no-progress
+          fi
