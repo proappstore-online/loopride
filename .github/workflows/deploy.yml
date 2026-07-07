@@ -1,19 +1,14 @@
 name: Deploy to R2
 
-# Path B hosting: builds the app on every push to main and uploads web/dist/
-# to the shared pas-apps R2 bucket at apps/<repo>/. The proappstore-host
-# Worker on *.proappstore.online reads this prefix to serve the app — no
-# per-app CF Pages project needed.
-#
-# Org-level secrets required (set once on the proappstore-online GitHub org):
-#   - R2_ACCESS_KEY_ID
-#   - R2_SECRET_ACCESS_KEY
-#   - R2_ACCOUNT_ID
-
 on:
   push:
     branches: [main]
-  workflow_dispatch:
+
+# Keyless deploy: the runner mints a GitHub OIDC token (no stored secret) and
+# exchanges it at the platform for short-lived, prefix-scoped R2 credentials.
+permissions:
+  contents: read
+  id-token: write
 
 concurrency:
   group: deploy-${{ github.repository }}
@@ -22,82 +17,111 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
 
-      - name: Install
-        run: pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile
+      - run: pnpm install --no-frozen-lockfile
 
       - name: Build
         env:
-          VITE_APP_VERSION: ${{ github.event.repository.name }}@${{ github.run_number }}
           VITE_COMMIT_SHA: ${{ github.sha }}
-          VITE_BUILD_DATE: ${{ github.event.head_commit.timestamp }}
-        run: |
-          # Try full build (tsc + vite). If tsc fails on type errors,
-          # fall back to vite-only (deploy > type perfection).
-          pnpm build || (cd web 2>/dev/null || true; npx vite build)
+        run: pnpm build || (cd web 2>/dev/null || true; npx vite build)
 
-      - name: Verify build output
+      - name: Locate build output
+        id: dist
         run: |
-          test -d ./web/dist || { echo "::error::No build output at web/dist"; exit 1; }
-          test -n "$(ls -A ./web/dist)" || { echo "::error::web/dist is empty"; exit 1; }
+          if [ -d web/dist ]; then echo "dir=web/dist" >> "$GITHUB_OUTPUT"
+          elif [ -d dist ]; then echo "dir=dist" >> "$GITHUB_OUTPUT"
+          else echo "::error::No build output (looked for ./dist and ./web/dist)"; exit 1; fi
 
-      - name: Write build info
+      - name: Code-health scan (VCQA, report-only)
+        continue-on-error: true
         run: |
-          SIZE=$(du -sb ./web/dist | cut -f1)
-          echo "{\"size\":${SIZE},\"sha\":\"${{ github.sha }}\",\"ts\":$(date +%s)}" > ./web/dist/.buildinfo.json
+          npx -y @vibecodeqa/cli@0.44.0 --skip-tests . || true
+          if [ -f .vibe-check/report.json ]; then
+            mkdir -p "${{ steps.dist.outputs.dir }}/.vcqa"
+            cp .vibe-check/report.json "${{ steps.dist.outputs.dir }}/.vcqa/report.json"
+            [ -f .vibe-check/badge.svg ] && cp .vibe-check/badge.svg "${{ steps.dist.outputs.dir }}/.vcqa/badge.svg" || true
+          fi
+
+      - name: Mint deploy credentials (keyless — GitHub OIDC → platform)
+        run: |
+          # 1. Ask GitHub for an OIDC token scoped to the platform audience.
+          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.proappstore.online" | jq -r '.value')
+          if [ -z "$OIDC" ] || [ "$OIDC" = "null" ]; then echo "::error::could not obtain OIDC token"; exit 1; fi
+          # 2. Exchange it for short-lived, prefix-scoped R2 credentials.
+          RESP=$(curl -sS -X POST \
+            "https://api.proappstore.online/v1/apps/${{ github.event.repository.name }}/deploy-credentials" \
+            -H "Authorization: Bearer $OIDC")
+          AKID=$(echo "$RESP" | jq -r '.accessKeyId // empty')
+          if [ -z "$AKID" ]; then echo "::error::deploy-credentials failed: $(echo "$RESP" | jq -c '.error // .')"; exit 1; fi
+          # 3. Export masked, ephemeral creds for the upload step.
+          echo "::add-mask::$(echo "$RESP" | jq -r '.secretAccessKey')"
+          echo "::add-mask::$(echo "$RESP" | jq -r '.sessionToken')"
+          {
+            echo "AWS_ACCESS_KEY_ID=$AKID"
+            echo "AWS_SECRET_ACCESS_KEY=$(echo "$RESP" | jq -r '.secretAccessKey')"
+            echo "AWS_SESSION_TOKEN=$(echo "$RESP" | jq -r '.sessionToken')"
+            echo "R2_ENDPOINT=$(echo "$RESP" | jq -r '.endpoint')"
+          } >> "$GITHUB_ENV"
 
       - name: Upload to R2
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
         run: |
-          aws s3 sync ./web/dist "s3://pas-apps/apps/${GITHUB_REPOSITORY##*/}/" \
-            --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" \
-            --delete \
-            --no-progress
-          echo "Deployed apps/${GITHUB_REPOSITORY##*/} from ${GITHUB_SHA::7}"
+          aws s3 sync "${{ steps.dist.outputs.dir }}" "s3://pas-apps/apps/${{ github.event.repository.name }}/" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --delete --no-progress
+          echo "Deployed apps/${{ github.event.repository.name }} from ${{ github.sha }}"
 
-      - name: Verify route
-        if: always()
-        run: |
-          APP_ID="${GITHUB_REPOSITORY##*/}"
-          URL="https://${APP_ID}.proappstore.online"
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" --max-time 10 || echo "000")
-          if [ "$STATUS" = "530" ] || [ "$STATUS" = "522" ] || [ "$STATUS" = "000" ]; then
-            echo "::warning::Deployed to R2 but ${URL} returned HTTP ${STATUS} (not routed). Run 'npx @proappstore/cli publish' to register the route."
-          else
-            echo "Live at ${URL} (HTTP ${STATUS})"
-          fi
-
-      - name: Code health scan
-        run: npx @vibecodeqa/cli@0.31 --json --badge > /dev/null 2>&1 || true
-
-      - name: Upload code health
-        if: always()
+  # Behavioural gate: drive the LIVE app in a real browser (the thing tsc/build
+  # can't check). Runs after deploy; a failure fails the run, so the deploy
+  # gate routes the ticket back to Dev with the Playwright output. Auth uses a
+  # platform fixture session via the SDK's real sign-in path (no test bypass);
+  # auth-gated specs skip when PAS_E2E_SESSION_TOKEN is unset.
+  e2e:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install E2E deps
+        working-directory: e2e
+        run: npm install
+      - name: Install Playwright browser
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+      - name: Run E2E against the live app
+        id: e2e
+        continue-on-error: true
+        working-directory: e2e
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          E2E_BASE_URL: https://${{ github.event.repository.name }}.proappstore.online
+          E2E_SESSION_TOKEN: ${{ secrets.PAS_E2E_SESSION_TOKEN }}
+        run: npx playwright test
+      - name: Publish test results (kb.proappstore.online/<app>/.e2e/summary.json)
+        if: always()
+        working-directory: e2e
+        env:
+          INTERNAL_TOKEN: ${{ secrets.INTERNAL_TOKEN }}
+          APP: ${{ github.event.repository.name }}
         run: |
-          APP_ID="${GITHUB_REPOSITORY##*/}"
-          EP="https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com"
-          if [ -f .vibe-check/report.json ]; then
-            aws s3 cp .vibe-check/report.json "s3://pas-apps/apps/$APP_ID/.vcqa/report.json" \
-              --endpoint-url "$EP" --content-type application/json --no-progress
-          fi
-          if [ -f .vibe-check/badge.svg ]; then
-            aws s3 cp .vibe-check/badge.svg "s3://pas-apps/apps/$APP_ID/.vcqa/badge.svg" \
-              --endpoint-url "$EP" --content-type image/svg+xml --no-progress
-          fi
+          node -e '
+            const fs=require("fs");
+            let r={}; try{ r=JSON.parse(fs.readFileSync("results.json","utf8")); }catch{}
+            const s=r.stats||{}, specs=[];
+            const walk=(su=[])=>su.forEach(x=>{ (x.specs||[]).forEach(sp=>specs.push({title:[x.title,sp.title].filter(Boolean).join(" > "),ok:sp.ok!==false})); walk(x.suites||[]); });
+            walk(r.suites||[]);
+            fs.writeFileSync("summary.json", JSON.stringify({ ranAt:new Date().toISOString(), passed:s.expected||0, failed:s.unexpected||0, flaky:s.flaky||0, skipped:s.skipped||0, ok:(s.unexpected||0)===0, specs }));
+          '
+          [ -n "$INTERNAL_TOKEN" ] && curl -fsS -X PUT "https://kb.proappstore.online/_ingest/$APP/.e2e/summary.json" -H "x-internal-token: $INTERNAL_TOKEN" --data-binary @summary.json >/dev/null && echo "results → kb.proappstore.online/$APP/.e2e/summary.json" || echo "skipped results upload (no INTERNAL_TOKEN)"
+      - name: Fail the run if E2E failed (bounces the ticket to Dev)
+        if: steps.e2e.outcome != 'success'
+        run: echo "::error::E2E tests failed — see the results above" && exit 1
