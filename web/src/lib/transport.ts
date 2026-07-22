@@ -15,13 +15,15 @@ export interface Transport {
 /**
  * Pick the best available transport for a ride.
  *
- * - Signed in → FAS rooms (cross-device WebSocket via Durable Object).
+ * - Signed in → PAS rooms (cross-device WebSocket via Durable Object).
  * - Anonymous → BroadcastChannel (same browser only).
  *
  * Transport is locked at open time; signing in mid-trip doesn't switch.
  */
 export function openTransport(rideId: string): Transport {
-  if (app.auth.token) {
+  // Signed-in check via `user`, not the bearer token — in platform-cookie mode
+  // the token lives in the HttpOnly cookie and `auth.token` is always null.
+  if (app.auth.user) {
     const room = app.rooms.join(rideId)
     return {
       kind: 'rooms',

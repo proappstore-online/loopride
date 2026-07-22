@@ -22,7 +22,7 @@ import type { RecurringRide } from '../types'
  */
 export async function syncRides(): Promise<void> {
   const user = app?.auth?.user
-  if (!user?.id || !app?.auth?.token) return
+  if (!user?.id) return
 
   const localOwner = getLocalRidesOwner()
   if (localOwner && localOwner !== user.id) {
@@ -55,7 +55,7 @@ export async function syncRides(): Promise<void> {
  */
 export function pushRides(rides: RecurringRide[]): void {
   try {
-    if (!app?.auth?.token || !app.kv) return
+    if (!app?.auth?.user || !app.kv) return
     void app.kv.set(KV_KEYS.rides, rides).catch(() => undefined)
   } catch {
     // SDK not fully wired (test stubs, partial mocks) — local stays the
