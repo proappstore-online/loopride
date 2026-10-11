@@ -115,6 +115,9 @@ export default function DriverTrip({ rideId }: DriverTripProps) {
         at: Date.now(),
       })
     }
+    const updatedRide = { ...ride, status: 'arrived' as const }
+    saveRide(updatedRide)
+    setRide(updatedRide)
     setSimStep(1)
     setPhase('arrived')
   }
@@ -130,6 +133,9 @@ export default function DriverTrip({ rideId }: DriverTripProps) {
         at: Date.now(),
       })
     }
+    const updatedRide = { ...ride, status: 'completed' as const }
+    saveRide(updatedRide)
+    setRide(updatedRide)
     setPhase('done')
     setLocation('/driver')
   }
@@ -143,7 +149,7 @@ export default function DriverTrip({ rideId }: DriverTripProps) {
         >
           ← Back
         </button>
-        <h1 className="display-font text-2xl font-bold text-[var(--ink)]">Driving</h1>
+        <h1 className="text-xl font-extrabold tracking-[-0.05em] text-[var(--ink)]">RideShare Drive</h1>
       </header>
 
       <section className="mb-4">
@@ -169,7 +175,7 @@ export default function DriverTrip({ rideId }: DriverTripProps) {
         <p className="mt-1 text-sm font-semibold text-[var(--ink)]">
           {ride.pickup} → {ride.dropoff}
         </p>
-        <p className="mt-1 text-xs text-[var(--muted)]">Rider expects you at {ride.time}</p>
+        <p className="mt-1 text-xs text-[var(--muted)]">{ride.bookingType === 'now' ? 'On-demand request' : `Pickup time: ${ride.time}`}</p>
       </section>
 
       {phase !== 'pre' && (
@@ -219,7 +225,7 @@ export default function DriverTrip({ rideId }: DriverTripProps) {
       <section className="mt-4 rounded-3xl border border-[var(--line)] p-6">
         <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Status</p>
         <p className="mt-1 display-font text-2xl font-semibold text-[var(--ink)]">
-          {phase === 'pre' && 'Ready to drive'}
+          {phase === 'pre' && 'Ready to accept'}
           {phase === 'driving' && `En route · ${Math.round(simStep * 100)}% of route`}
           {phase === 'arrived' && 'Arrived at pickup'}
           {phase === 'done' && 'Trip complete'}
@@ -231,7 +237,7 @@ export default function DriverTrip({ rideId }: DriverTripProps) {
               onClick={onStart}
               className="rounded-2xl bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-white"
             >
-              Start trip
+              Accept & start trip
             </button>
           )}
           {phase === 'driving' && (

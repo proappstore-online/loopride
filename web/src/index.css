@@ -3,25 +3,25 @@
 @layer base {
 :root {
   color-scheme: light;
-  --paper: #ffffff;
-  --ink: #111111;
-  --muted: #666666;
-  --accent: #7c3aed;
-  --accent-soft: #f5f3ff;
+  --paper: #fbfbfa;
+  --ink: #171c21;
+  --muted: #68717b;
+  --accent: #146c5a;
+  --accent-soft: #e7f4ef;
   --line: rgba(0,0,0,0.08);
   --glass: rgba(255,255,255,0.72);
   --glass-hover: rgba(255,255,255,0.85);
-  --error: #c74f43;
-  --success: #2f8f57;
+  --error: #c94f43;
+  --success: #197652;
 }
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --paper: #000000;
-  --ink: #f0f0f0;
-  --muted: #888888;
-  --accent: #a78bfa;
-  --accent-soft: #1e1533;
+  --paper: #111716;
+  --ink: #f4f7f5;
+  --muted: #aab4af;
+  --accent: #54c29b;
+  --accent-soft: #18352d;
   --line: rgba(255,255,255,0.08);
   --glass: rgba(26,26,26,0.8);
   --glass-hover: rgba(38,38,38,0.9);

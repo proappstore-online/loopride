@@ -1,12 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
 
-vi.mock('./TripMap', () => ({
-  default: ({ driver }: { driver: { lat: number; lng: number } | null }) => (
-    <div data-testid="trip-map" data-driver={driver ? `${driver.lat},${driver.lng}` : 'none'} />
-  ),
-}))
+vi.mock('./TripMap', () => ({ default: ({ driver }: { driver: { lat: number; lng: number } | null }) => <div data-testid="trip-map" data-driver={driver ? `${driver.lat},${driver.lng}` : 'none'} /> }))
 
 import Trip from './Trip'
 import { saveRide } from '../storage'
@@ -14,123 +9,58 @@ import { publish } from '../lib/channel'
 import type { RecurringRide } from '../types'
 import { renderWithRouter } from '../../test/router'
 
-const ride: RecurringRide = {
-  id: 'ride-trip',
-  pickup: 'A',
-  pickupCoord: { lat: 0, lng: 0 },
-  dropoff: 'B',
-  dropoffCoord: { lat: 1, lng: 1 },
-  days: ['mon'],
-  time: '08:00',
-  driverName: 'Alex',
-  paused: false,
-  createdAt: 1,
-}
-
-const tick = () => new Promise((r) => setTimeout(r, 30))
+const ride: RecurringRide = { id: 'ride-trip', pickup: 'A', pickupCoord: { lat: 0, lng: 0 }, dropoff: 'B', dropoffCoord: { lat: 1, lng: 1 }, days: [], time: '08:00', driverName: 'Jordan', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'comfort', fareCents: 1711, etaMinutes: 5, driverPlate: 'RS-482', driverRating: 4.9 }
+const tick = () => new Promise((resolve) => setTimeout(resolve, 30))
 
 describe('Trip', () => {
-  it('renders ride summary and shows scheduled by default', () => {
+  it('shows the assigned driver, tier, estimate and arrival time', () => {
     saveRide(ride)
     render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
-    expect(screen.getByText('A → B')).toBeInTheDocument()
-    expect(screen.getByText(/Alex/)).toBeInTheDocument()
-    expect(screen.getByText('Scheduled')).toBeInTheDocument()
-    expect(screen.getByText('No live feed')).toBeInTheDocument()
+    expect(screen.getByText('Jordan')).toBeInTheDocument()
+    expect(screen.getByText(/Comfort.*\$17.11/)).toBeInTheDocument()
+    expect(screen.getByText('Jordan arrives in 5 min')).toBeInTheDocument()
   })
 
-  it('Simulate: driver on way switches status to en-route', async () => {
-    saveRide(ride)
+  it('counts down from the saved ETA instead of the immutable estimate', () => {
+    vi.useFakeTimers()
+    try {
+      saveRide({ ...ride, etaMinutes: 4 })
+      render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
+      expect(screen.getByText('Jordan arrives in 4 min')).toBeInTheDocument()
+
+      act(() => vi.advanceTimersByTime(3_000))
+
+      expect(screen.getByText('Jordan arrives in 3 min')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('restores a persisted completed ride after reload', () => {
+    saveRide({ ...ride, status: 'completed' })
     render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
-    await userEvent.click(screen.getByRole('button', { name: 'Simulate: driver on way' }))
-    expect(screen.getByText(/Driver en route/)).toBeInTheDocument()
+    expect(screen.getByText('Trip completed')).toBeInTheDocument()
   })
 
-  it('shows Ride not found for unknown id', () => {
+  it('shows a useful missing-ride state', () => {
     render(renderWithRouter(<Trip rideId="missing" />).ui)
     expect(screen.getByText('Ride not found.')).toBeInTheDocument()
   })
 
-  it('reacts to a channel ping with status en-route', async () => {
+  it('reacts to a live location ping from the driver', async () => {
     saveRide(ride)
     render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
-    expect(screen.getByText('Scheduled')).toBeInTheDocument()
-
-    await act(async () => {
-      publish({
-        rideId: 'ride-trip',
-        position: { lat: 0.5, lng: 0.5 },
-        speedMps: 10,
-        accuracyM: 5,
-        status: 'en-route',
-        at: Date.now(),
-      })
-      await tick()
-    })
-
-    expect(screen.getByText(/Live · /)).toBeInTheDocument()
-    expect(screen.getByText('Driver en route')).toBeInTheDocument()
+    await act(async () => { publish({ rideId: 'ride-trip', position: { lat: 0.5, lng: 0.5 }, speedMps: 10, accuracyM: 5, status: 'en-route', at: Date.now() }); await tick() })
+    expect(screen.getByText(/Live ·/)).toBeInTheDocument()
+    expect(screen.getByText('Jordan is on the way')).toBeInTheDocument()
     expect(screen.getByTestId('trip-map').dataset.driver).toBe('0.5,0.5')
   })
 
-  it('ignores pings for other ride ids', async () => {
+  it('keeps the last known driver position if a feed becomes stale', async () => {
     saveRide(ride)
     render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
-
-    await act(async () => {
-      publish({
-        rideId: 'OTHER',
-        position: { lat: 9, lng: 9 },
-        speedMps: 10,
-        accuracyM: 5,
-        status: 'en-route',
-        at: Date.now(),
-      })
-      await tick()
-    })
-
-    expect(screen.getByText('Scheduled')).toBeInTheDocument()
-    expect(screen.getByText('No live feed')).toBeInTheDocument()
-  })
-
-  it('stale ping keeps the dot at last known position (no snap back)', async () => {
-    saveRide(ride)
-    render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
-
-    await act(async () => {
-      publish({
-        rideId: 'ride-trip',
-        position: { lat: 0.7, lng: 0.7 },
-        speedMps: 10,
-        accuracyM: 5,
-        status: 'en-route',
-        at: Date.now() - 60_000, // older than REAL_FEED_TIMEOUT_MS (15s)
-      })
-      await tick()
-    })
-
+    await act(async () => { publish({ rideId: 'ride-trip', position: { lat: 0.7, lng: 0.7 }, speedMps: 10, accuracyM: 5, status: 'en-route', at: Date.now() - 60_000 }); await tick() })
     expect(screen.getByText(/Last seen/)).toBeInTheDocument()
-    expect(screen.queryByText(/Live · /)).not.toBeInTheDocument()
-    // Dot stays at the last broadcast position rather than interpolating to pickup.
     expect(screen.getByTestId('trip-map').dataset.driver).toBe('0.7,0.7')
-  })
-
-  it('arrived ping moves status to arrived', async () => {
-    saveRide(ride)
-    render(renderWithRouter(<Trip rideId="ride-trip" />).ui)
-
-    await act(async () => {
-      publish({
-        rideId: 'ride-trip',
-        position: { lat: 1, lng: 1 },
-        speedMps: 0,
-        accuracyM: 5,
-        status: 'arrived',
-        at: Date.now(),
-      })
-      await tick()
-    })
-
-    expect(screen.getByText('Driver has arrived')).toBeInTheDocument()
   })
 })

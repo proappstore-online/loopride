@@ -4,7 +4,6 @@ import type { LatLng, RecurringRide } from '../types'
 import { DAYS } from '../types'
 import { getRide, saveRide } from '../storage'
 import { openTransport, type DriverPing, type TransportKind } from '../lib/transport'
-import { encodeShareUrl } from '../lib/share'
 import { interpolate } from '../lib/geo'
 import { LIVE_FEED_TIMEOUT_MS } from '../lib/constants'
 
@@ -15,20 +14,24 @@ interface TripProps {
   rideId: string
 }
 
-type TripStatus = 'scheduled' | 'en-route' | 'arrived' | 'completed'
+type TripStatus = 'scheduled' | 'matching' | 'en-route' | 'arrived' | 'completed'
 
 export default function Trip({ rideId }: TripProps) {
   const [, setLocation] = useLocation()
   const [ride, setRide] = useState<RecurringRide | undefined>(undefined)
-  const [status, setStatus] = useState<TripStatus>('scheduled')
+  const [status, setStatus] = useState<TripStatus>('matching')
   const [eta, setEta] = useState<number>(TOTAL_ETA)
   const [lastPing, setLastPing] = useState<DriverPing | null>(null)
   const [transportKind, setTransportKind] = useState<TransportKind | null>(null)
-  const [copied, setCopied] = useState(false)
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
-    setRide(getRide(rideId))
+    const savedRide = getRide(rideId)
+    setRide(savedRide)
+    if (savedRide) {
+      setEta(savedRide.etaMinutes ?? TOTAL_ETA)
+      setStatus(savedRide.status ?? (savedRide.bookingType === 'now' ? 'en-route' : 'scheduled'))
+    }
   }, [rideId])
 
   useEffect(() => {
@@ -36,7 +39,7 @@ export default function Trip({ rideId }: TripProps) {
     setTransportKind(transport.kind)
     const unsub = transport.subscribe((ping) => {
       setLastPing(ping)
-      if (ping.status === 'en-route') setStatus((s) => (s === 'scheduled' ? 'en-route' : s))
+      if (ping.status === 'en-route') setStatus('en-route')
       if (ping.status === 'arrived') setStatus('arrived')
       if (ping.status === 'completed') setStatus('completed')
     })
@@ -68,7 +71,7 @@ export default function Trip({ rideId }: TripProps) {
     // Real-feed positions win even when stale — last-known location is more
     // useful than a fake interpolation that snaps the dot back to pickup.
     if (lastPing) return lastPing.position
-    if (status === 'scheduled') return null
+    if (status === 'scheduled' || status === 'matching') return null
     if (status === 'completed') return null
     if (status === 'arrived') return ride.dropoffCoord
     return interpolate(ride.pickupCoord, ride.dropoffCoord, (TOTAL_ETA - eta) / TOTAL_ETA)
@@ -99,7 +102,9 @@ export default function Trip({ rideId }: TripProps) {
         >
           ← Back
         </button>
-        <h1 className="display-font text-2xl font-bold text-[var(--ink)]">Next trip</h1>
+        <h1 className="text-xl font-extrabold tracking-[-0.05em] text-[var(--ink)]">
+          {ride.bookingType === 'recurring' ? 'Your routine' : ride.bookingType === 'scheduled' ? 'Reserved ride' : 'Your ride'}
+        </h1>
       </header>
 
       <section className="mb-4">
@@ -125,35 +130,13 @@ export default function Trip({ rideId }: TripProps) {
         <p className="mt-1 text-sm font-semibold text-[var(--ink)]">
           {ride.pickup} → {ride.dropoff}
         </p>
-        <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
-          Schedule
-        </p>
+        <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">{ride.bookingType === 'recurring' ? 'Routine' : 'Ride option'}</p>
         <p className="mt-1 text-sm text-[var(--ink)]">
-          {DAYS.filter((d) => ride.days.includes(d.id))
-            .map((d) => d.label)
-            .join(', ')}{' '}
-          at <span className="tabular-nums">{ride.time}</span> with {ride.driverName}
+          {ride.bookingType === 'recurring'
+            ? `${DAYS.filter((d) => ride.days.includes(d.id)).map((d) => d.label).join(', ')} at ${ride.time}`
+            : `${ride.vehicle === 'xl' ? 'RideShare XL' : ride.vehicle === 'comfort' ? 'Comfort' : 'RideShare'}${ride.fareCents ? ` · $${(ride.fareCents / 100).toFixed(2)}` : ''}`}
         </p>
-        <div className="mt-4 flex items-center gap-3">
-          <button
-            onClick={async () => {
-              const url = encodeShareUrl(ride)
-              try {
-                await navigator.clipboard.writeText(url)
-                setCopied(true)
-                setTimeout(() => setCopied(false), 2000)
-              } catch {
-                window.prompt('Copy this link and send to your driver:', url)
-              }
-            }}
-            className="rounded-xl border border-[var(--line)] px-3 py-1.5 text-xs font-semibold text-[var(--ink)] hover:bg-[var(--accent-soft)]"
-          >
-            {copied ? 'Copied!' : 'Send to driver'}
-          </button>
-          <span className="text-[10px] text-[var(--muted)]">
-            Driver opens the link → ride imports → they drive.
-          </span>
-        </div>
+        {ride.driverName && <div className="mt-4 flex items-center gap-3 rounded-2xl bg-[var(--accent-soft)] px-4 py-3"><span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--accent)] text-sm font-bold text-white">{ride.driverName.slice(0, 1)}</span><span><span className="block text-sm font-bold text-[var(--ink)]">{ride.driverName}</span><span className="block text-xs text-[var(--muted)]">★ {ride.driverRating ?? 4.9} · {ride.driverPlate ?? 'Matching vehicle'}</span></span><button className="ml-auto text-sm text-[var(--accent)]" aria-label="Call driver">☎</button></div>}
       </section>
 
       <section className="mt-4 rounded-3xl border border-[var(--line)] p-6">
@@ -179,14 +162,15 @@ export default function Trip({ rideId }: TripProps) {
           )}
         </div>
         <p className="mt-1 display-font text-2xl font-semibold text-[var(--ink)]">
-          {status === 'scheduled' && 'Scheduled'}
-          {status === 'en-route' && (liveFeed ? 'Driver en route' : `Driver en route · ${eta} min`)}
-          {status === 'arrived' && 'Driver has arrived'}
+          {status === 'matching' && 'Finding a nearby driver'}
+          {status === 'scheduled' && `Reserved for ${ride.scheduledFor ? new Date(ride.scheduledFor).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : ride.time}`}
+          {status === 'en-route' && (liveFeed ? `${ride.driverName || 'Your driver'} is on the way` : `${ride.driverName || 'Your driver'} arrives in ${eta} min`)}
+          {status === 'arrived' && `${ride.driverName || 'Your driver'} has arrived`}
           {status === 'completed' && 'Trip completed'}
         </p>
 
         <div className="mt-5 flex flex-wrap gap-2">
-          {status === 'scheduled' && (
+          {(status === 'scheduled' || status === 'matching') && (
             <button
               onClick={() => {
                 setStatus('en-route')
@@ -194,7 +178,7 @@ export default function Trip({ rideId }: TripProps) {
               }}
               className="rounded-2xl bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-white"
             >
-              Simulate: driver on way
+              Preview driver arrival
             </button>
           )}
           {status === 'en-route' && !liveFeed && (
@@ -202,7 +186,7 @@ export default function Trip({ rideId }: TripProps) {
               onClick={() => setStatus('arrived')}
               className="rounded-2xl border border-[var(--line)] px-5 py-2 text-sm font-semibold text-[var(--ink)]"
             >
-              Mark arrived
+              Driver arrived
             </button>
           )}
           {status === 'arrived' && !liveFeed && (
