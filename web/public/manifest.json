@@ -4,6 +4,8 @@
   "description": "Recurring rides with live GPS tracking",
   "start_url": "/",
   "display": "standalone",
+  "orientation": "any",
+  "min_viewport_width": 360,
   "background_color": "#000000",
   "theme_color": "#7c3aed",
   "icons": [
