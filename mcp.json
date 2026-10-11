@@ -1,0 +1,157 @@
+{
+  "tools": [
+    {
+      "name": "save_ride",
+      "description": "Upsert one of the caller's rides as domain records (ride request plus its driver, vehicle, quote, assignment, trip and trip status event). Idempotent: ids are derived from the client ride, so replaying the same ride changes nothing.",
+      "operation": "batch",
+      "statements": [
+        "INSERT OR IGNORE INTO riders (id, created_at, updated_at) VALUES (:__user_id, :__now, :__now)",
+        "INSERT INTO drivers (rider_id, id, display_name, rating, status, created_at, updated_at) SELECT :__user_id, :driver_id, :driver_name, :driver_rating, 'active', :__now, :__now WHERE :driver_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET display_name = excluded.display_name, rating = COALESCE(excluded.rating, drivers.rating), updated_at = excluded.updated_at",
+        "INSERT INTO vehicles (rider_id, id, driver_id, plate, vehicle_class, created_at, updated_at) SELECT :__user_id, :vehicle_id, :driver_id, :vehicle_plate, :vehicle_class, :__now, :__now WHERE :vehicle_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET driver_id = excluded.driver_id, vehicle_class = COALESCE(excluded.vehicle_class, vehicles.vehicle_class), updated_at = excluded.updated_at",
+        "INSERT INTO ride_requests (rider_id, id, booking_type, status, pickup_label, pickup_lat, pickup_lng, dropoff_label, dropoff_lat, dropoff_lng, recurring_days, pickup_time, scheduled_for, vehicle_class, requested_at, client_record, created_at, updated_at) VALUES (:__user_id, :request_id, :booking_type, :request_status, :pickup_label, :pickup_lat, :pickup_lng, :dropoff_label, :dropoff_lat, :dropoff_lng, :recurring_days, :pickup_time, :scheduled_for, :vehicle_class, :requested_at, :client_record, :created_at, :__now) ON CONFLICT (rider_id, id) DO UPDATE SET booking_type = excluded.booking_type, status = excluded.status, pickup_label = excluded.pickup_label, pickup_lat = excluded.pickup_lat, pickup_lng = excluded.pickup_lng, dropoff_label = excluded.dropoff_label, dropoff_lat = excluded.dropoff_lat, dropoff_lng = excluded.dropoff_lng, recurring_days = excluded.recurring_days, pickup_time = excluded.pickup_time, scheduled_for = excluded.scheduled_for, vehicle_class = excluded.vehicle_class, requested_at = excluded.requested_at, client_record = excluded.client_record, updated_at = excluded.updated_at",
+        "INSERT INTO quotes (rider_id, id, request_id, vehicle_class, fare_cents, eta_minutes, status, created_at, updated_at) SELECT :__user_id, :quote_id, :request_id, :vehicle_class, :fare_cents, :eta_minutes, 'accepted', :__now, :__now WHERE :quote_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET vehicle_class = excluded.vehicle_class, fare_cents = excluded.fare_cents, eta_minutes = excluded.eta_minutes, updated_at = excluded.updated_at",
+        "INSERT INTO assignments (rider_id, id, request_id, driver_id, vehicle_id, status, created_at, updated_at) SELECT :__user_id, :assignment_id, :request_id, :driver_id, :vehicle_id, 'accepted', :__now, :__now WHERE :assignment_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET driver_id = excluded.driver_id, vehicle_id = excluded.vehicle_id, updated_at = excluded.updated_at",
+        "INSERT INTO trips (rider_id, id, request_id, assignment_id, status, created_at, updated_at) SELECT :__user_id, :trip_id, :request_id, :assignment_id, :trip_status, :__now, :__now WHERE :trip_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET assignment_id = excluded.assignment_id, status = excluded.status, updated_at = excluded.updated_at",
+        "INSERT OR IGNORE INTO trip_events (rider_id, id, trip_id, type, status, at) SELECT :__user_id, :trip_event_id, :trip_id, 'status', :trip_status, :__now WHERE :trip_event_id IS NOT NULL"
+      ],
+      "params": {
+        "request_id": {
+          "type": "string"
+        },
+        "booking_type": {
+          "type": "string"
+        },
+        "request_status": {
+          "type": "string"
+        },
+        "pickup_label": {
+          "type": "string"
+        },
+        "pickup_lat": {
+          "type": "number",
+          "optional": true
+        },
+        "pickup_lng": {
+          "type": "number",
+          "optional": true
+        },
+        "dropoff_label": {
+          "type": "string"
+        },
+        "dropoff_lat": {
+          "type": "number",
+          "optional": true
+        },
+        "dropoff_lng": {
+          "type": "number",
+          "optional": true
+        },
+        "recurring_days": {
+          "type": "string",
+          "optional": true
+        },
+        "pickup_time": {
+          "type": "string",
+          "optional": true
+        },
+        "scheduled_for": {
+          "type": "string",
+          "optional": true
+        },
+        "vehicle_class": {
+          "type": "string",
+          "optional": true
+        },
+        "requested_at": {
+          "type": "integer",
+          "optional": true
+        },
+        "client_record": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "integer"
+        },
+        "driver_id": {
+          "type": "string",
+          "optional": true
+        },
+        "driver_name": {
+          "type": "string",
+          "optional": true
+        },
+        "driver_rating": {
+          "type": "number",
+          "optional": true
+        },
+        "vehicle_id": {
+          "type": "string",
+          "optional": true
+        },
+        "vehicle_plate": {
+          "type": "string",
+          "optional": true
+        },
+        "quote_id": {
+          "type": "string",
+          "optional": true
+        },
+        "fare_cents": {
+          "type": "integer",
+          "optional": true
+        },
+        "eta_minutes": {
+          "type": "integer",
+          "optional": true
+        },
+        "assignment_id": {
+          "type": "string",
+          "optional": true
+        },
+        "trip_id": {
+          "type": "string",
+          "optional": true
+        },
+        "trip_status": {
+          "type": "string",
+          "optional": true
+        },
+        "trip_event_id": {
+          "type": "string",
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "cancel_ride",
+      "description": "Cancel one of the caller's ride requests and any unfinished trip for it",
+      "operation": "batch",
+      "statements": [
+        "UPDATE ride_requests SET status = 'cancelled', updated_at = :__now WHERE rider_id = :__user_id AND id = :request_id",
+        "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE rider_id = :__user_id AND request_id = :request_id AND status NOT IN ('completed', 'cancelled')"
+      ],
+      "params": {
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "list_ride_requests",
+      "description": "List the caller's ride requests, newest first",
+      "operation": "query",
+      "sql": "SELECT id, booking_type, status, pickup_label, dropoff_label, recurring_days, pickup_time, scheduled_for, vehicle_class, created_at, updated_at FROM ride_requests WHERE rider_id = :__user_id ORDER BY created_at DESC LIMIT :limit",
+      "params": {
+        "limit": {
+          "type": "integer",
+          "default": 50,
+          "max": 200,
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    }
+  ]
+}

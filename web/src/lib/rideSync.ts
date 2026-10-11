@@ -7,6 +7,7 @@ import {
   setLocalRidesOwner,
 } from '../storage'
 import { EVENTS, KV_KEYS, STORAGE_KEYS } from './constants'
+import { persistRides } from './rideRecords'
 import type { RecurringRide } from '../types'
 
 /**
@@ -18,7 +19,8 @@ import type { RecurringRide } from '../types'
  * anonymous (empty owner). If the local owner doesn't match, we clear local
  * before sync — that's the previous user's data, not ours.
  *
- * Anonymous users skip this entirely.
+ * After reconciling, every ride is migrated into the PAS DB domain model
+ * (see rideRecords.ts). Anonymous users skip this entirely.
  */
 export async function syncRides(): Promise<void> {
   const user = app?.auth?.user
@@ -36,13 +38,16 @@ export async function syncRides(): Promise<void> {
       localStorage.setItem(STORAGE_KEYS.rides, JSON.stringify(remote))
       setLocalRidesOwner(user.id)
       window.dispatchEvent(new Event(EVENTS.ridesChanged))
-      return
+    } else {
+      const local = listRides()
+      if (local.length > 0) {
+        await app.kv.set(KV_KEYS.rides, local)
+      }
+      setLocalRidesOwner(user.id)
     }
-    const local = listRides()
-    if (local.length > 0) {
-      await app.kv.set(KV_KEYS.rides, local)
-    }
-    setLocalRidesOwner(user.id)
+    // Migrate the reconciled list into the PAS DB. Idempotent (upserts keyed
+    // by ride id), so running it on every sign-in is safe.
+    await persistRides(listRides())
   } catch {
     // Network/KV hiccup. Local stays authoritative; next sync will retry.
   }

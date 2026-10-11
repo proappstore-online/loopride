@@ -1,5 +1,6 @@
 import type { RecurringRide } from './types'
 import { pushRides } from './lib/rideSync'
+import { cancelRideRecord, persistRide } from './lib/rideRecords'
 import { EVENTS, STORAGE_KEYS } from './lib/constants'
 
 export const RIDES_KEY = STORAGE_KEYS.rides
@@ -47,6 +48,7 @@ export function saveRide(ride: RecurringRide): void {
   localStorage.setItem(RIDES_KEY, JSON.stringify(rides))
   emitChanged()
   pushRides(rides)
+  void persistRide(ride).catch(() => undefined)
 }
 
 export function deleteRide(id: string): void {
@@ -54,6 +56,7 @@ export function deleteRide(id: string): void {
   localStorage.setItem(RIDES_KEY, JSON.stringify(rides))
   emitChanged()
   pushRides(rides)
+  void cancelRideRecord(id).catch(() => undefined)
 }
 
 export function getRide(id: string): RecurringRide | undefined {
