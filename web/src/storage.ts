@@ -2,23 +2,25 @@ import type { RecurringRide } from './types'
 import { pushRides } from './lib/rideSync'
 import { EVENTS, STORAGE_KEYS } from './lib/constants'
 
-const RIDES_KEY = STORAGE_KEYS.rides
+export const RIDES_KEY = STORAGE_KEYS.rides
 const OWNER_KEY = STORAGE_KEYS.ridesOwner
-const LEGACY_RIDES_KEY_V1 = 'loopride.rides.v1'
+const LEGACY_RIDES_KEYS = ['loopride.rides.v1']
 
 /**
- * One-time migration: pre-rename data lived at loopride.rides.v1. Move it
- * over if we find it and the new key is empty. Safe to leave running — it's
- * a no-op after the first import.
+ * One-time migration from Loopride v1 to the current ride record. The
+ * physical key remains stable through the RideShare rebrand so no rider
+ * history or active driver link is stranded.
  */
 function migrateLegacy(): void {
   if (typeof localStorage === 'undefined') return
-  const legacy = localStorage.getItem(LEGACY_RIDES_KEY_V1)
+  const legacy = LEGACY_RIDES_KEYS.map((key) => [key, localStorage.getItem(key)] as const).find(
+    ([, value]) => Boolean(value),
+  )
   if (!legacy) return
-  if (!localStorage.getItem(RIDES_KEY)) {
-    localStorage.setItem(RIDES_KEY, legacy)
+  if (!localStorage.getItem(RIDES_KEY) && legacy[1]) {
+    localStorage.setItem(RIDES_KEY, legacy[1])
   }
-  localStorage.removeItem(LEGACY_RIDES_KEY_V1)
+  LEGACY_RIDES_KEYS.forEach((key) => localStorage.removeItem(key))
 }
 
 function emitChanged(): void {

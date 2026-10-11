@@ -122,6 +122,7 @@ describe('pushRides', () => {
 
   it('fires kv.set when signed in', async () => {
     authState.token = 'jwt'
+    authState.user = { id: 'user-1' }
     kv.set.mockResolvedValueOnce(undefined)
     const { pushRides } = await import('./rideSync')
     pushRides([ride('a')])

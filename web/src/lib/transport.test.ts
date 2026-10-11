@@ -7,14 +7,14 @@ const { authState, room } = vi.hoisted(() => {
     onMessage: vi.fn(() => () => undefined),
     close: vi.fn(),
   }
-  return { authState: { token: null as string | null }, room }
+  return { authState: { user: null as { id: string } | null }, room }
 })
 
 vi.mock('./app', () => ({
   app: {
     auth: {
-      get token() {
-        return authState.token
+      get user() {
+        return authState.user
       },
     },
     rooms: {
@@ -39,13 +39,13 @@ const flush = () => new Promise((r) => setTimeout(r, 10))
 
 describe('transport', () => {
   it('picks broadcast when not signed in', () => {
-    authState.token = null
+    authState.user = null
     const t = openTransport('r1')
     expect(t.kind).toBe('broadcast')
   })
 
   it('broadcast publish/subscribe round-trips for matching rideId', async () => {
-    authState.token = null
+    authState.user = null
     const cb = vi.fn()
     const t = openTransport('r1')
     t.subscribe(cb)
@@ -56,7 +56,7 @@ describe('transport', () => {
   })
 
   it('broadcast subscribe ignores other rideIds', async () => {
-    authState.token = null
+    authState.user = null
     const cb = vi.fn()
     const t = openTransport('r1')
     t.subscribe(cb)
@@ -67,13 +67,13 @@ describe('transport', () => {
   })
 
   it('picks rooms when signed in', () => {
-    authState.token = 'fake-jwt'
+    authState.user = { id: 'driver-1' }
     const t = openTransport('r1')
     expect(t.kind).toBe('rooms')
   })
 
   it('rooms publish forwards to room.send', () => {
-    authState.token = 'fake-jwt'
+    authState.user = { id: 'driver-1' }
     const t = openTransport('r1')
     const p = ping('r1')
     t.publish(p)
@@ -81,7 +81,7 @@ describe('transport', () => {
   })
 
   it('rooms close calls room.close', () => {
-    authState.token = 'fake-jwt'
+    authState.user = { id: 'driver-1' }
     const t = openTransport('r1')
     t.close()
     expect(room.close).toHaveBeenCalled()

@@ -1,7 +1,9 @@
-export const APP_ID = 'loopride'
+export const APP_ID = 'rideshare'
 
 /** localStorage keys. Prefixed `loopride.` + versioned so we can migrate later. */
 export const STORAGE_KEYS = {
+  // Keep the established keys so existing rider history and driver links work
+  // through the brand rename. A server-side migration can change these later.
   rides: 'loopride.rides.v2',
   role: 'loopride.role.v1',
   ridesOwner: 'loopride.rides.owner.v1',

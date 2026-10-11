@@ -32,6 +32,30 @@ export interface RecurringRide {
    * when the route fetch succeeds, fetched lazily otherwise.
    */
   routePolyline?: [number, number][]
+  /** RideShare supports both immediate and planned trips. Old Loopride records
+   * simply omit this and remain valid scheduled rides after migration. */
+  bookingType?: 'now' | 'scheduled' | 'recurring'
+  vehicle?: 'share' | 'comfort' | 'xl'
+  fareCents?: number
+  etaMinutes?: number
+  requestedAt?: number
+  scheduledFor?: string
+  /** Assigned automatically by the marketplace rather than chosen by rider. */
+  driverPlate?: string
+  driverRating?: number
+  /** Locally persisted progress for an active on-demand ride. */
+  status?: 'en-route' | 'arrived' | 'completed'
 }
+
+/** The public product language. Kept as an alias while old saved rides migrate. */
+export type Ride = RecurringRide
+
+export const VEHICLES = [
+  { id: 'share', label: 'RideShare', description: 'Affordable everyday rides', multiplier: 1 },
+  { id: 'comfort', label: 'Comfort', description: 'Newer cars, extra legroom', multiplier: 1.45 },
+  { id: 'xl', label: 'RideShare XL', description: 'Room for up to 6', multiplier: 1.9 },
+] as const
+
+export type VehicleType = (typeof VEHICLES)[number]['id']
 
 export type Role = 'rider' | 'driver'
