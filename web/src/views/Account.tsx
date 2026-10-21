@@ -25,6 +25,7 @@ import {
 } from '../lib/riderAccount'
 import { loadReceipts, type Receipt } from '../lib/receipts'
 import ReceiptCard from '../components/ReceiptCard'
+import NotificationSettings from '../components/NotificationSettings'
 
 const card = 'rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4'
 const input = 'w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm text-[var(--ink)]'
@@ -55,6 +56,7 @@ export default function Account() {
       {signedIn && (
         <>
           <Receipts />
+          <NotificationSettings />
           <ProfileForm />
           <SavedPlaces />
           <DataControls deleteAccount={auth.deleteAccount} />
@@ -155,18 +157,13 @@ function ProfileForm() {
 
   return (
     <form onSubmit={submit} className="space-y-3" aria-label="Profile">
-      <h2 className={heading}>Profile and contact preferences</h2>
+      <h2 className={heading}>Profile</h2>
       <label className="block text-xs font-bold text-[var(--ink)]">Name
         <input className={`${input} mt-1`} value={profile.displayName} maxLength={80} onChange={(e) => set('displayName', e.target.value)} />
       </label>
       <label className="block text-xs font-bold text-[var(--ink)]">Phone
         <input className={`${input} mt-1`} type="tel" value={profile.phone} maxLength={30} onChange={(e) => set('phone', e.target.value)} />
       </label>
-      {([['notifyTripUpdates', 'Trip updates (driver assigned, arriving)'], ['notifyEmail', 'Email receipts'], ['notifySms', 'Text messages']] as const).map(([key, label]) => (
-        <label key={key} className="flex items-center gap-2 text-sm text-[var(--ink)]">
-          <input type="checkbox" checked={profile[key]} onChange={(e) => set(key, e.target.checked)} /> {label}
-        </label>
-      ))}
       <button disabled={saving} className="rounded-2xl bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-white disabled:opacity-60">Save profile</button>
     </form>
   )

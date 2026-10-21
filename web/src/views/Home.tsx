@@ -3,6 +3,7 @@ import type { RecurringRide } from '../types'
 import { deleteRide, saveRide } from '../storage'
 import RoleToggle from '../components/RoleToggle'
 import AuthChip from '../components/AuthChip'
+import NotificationBell from '../components/NotificationBell'
 import { useAuth } from '../lib/useAuth'
 import { useRideList } from '../lib/useRideList'
 import { app } from '../lib/app'
@@ -38,6 +39,7 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-2">
             <AuthChip loading={auth.loading} user={auth.user} onSignIn={(provider) => app.auth.signIn(provider)} onSignOut={auth.signOut} />
+            <NotificationBell signedIn={Boolean(auth.user)} />
             <button onClick={() => setLocation('/account')} className="rounded-full border border-[var(--line)] px-3 py-1 text-xs font-semibold text-[var(--ink)] hover:bg-[var(--accent-soft)]">Account</button>
             <RoleToggle role="rider" />
           </div>

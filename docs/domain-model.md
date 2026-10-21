@@ -386,6 +386,76 @@ recorded cancellation fee; corrections are ops credits that never exceed the amo
 is collected and no payout is made**, and no card or credential data exists anywhere in
 the app; collection is blocked on a PAS policy decision (ADR, "Needs an owner decision").
 
+## Notifications (issue #10)
+
+Migration `0010_notifications`: `notifications` (inbox and delivery outbox in one row,
+one per recipient per event) and `notification_prefs`. Client: `lib/notifications.ts`,
+`lib/useNotifications.ts`, `components/NotificationBell.tsx` (Home and Driver home),
+`components/NotificationSettings.tsx` (Account page, which drivers use too).
+
+**Who is told what.** The notification row is written by the same SQL transaction as the
+trip event, so it exists exactly once, only for a valid transition, and carries the link to
+the right trip (rider `/trip/<ride>`, driver `/driver/trip/<rider>/<ride>`, offers
+`/driver`). The person who caused an event is never notified of it.
+
+| Event | Recipient | Critical |
+|---|---|---|
+| New ride offer (30 s window) | driver | no |
+| Driver confirmed (`driver_assigned`, with name and plate) | rider | yes |
+| Driver on the way | rider | no |
+| Driver arrived | rider | yes |
+| Trip started | rider | no |
+| Trip completed, receipt ready (with the total) | rider | yes |
+| Cancelled (by rider, driver or ops, with reason and fee) | the other party; both for ops | yes |
+| Rider no-show / driver no-show | the party reported | yes |
+| Dispute decided | whoever opened it | no |
+
+**Idempotent.** Each id is deterministic (`<trip>:<kind>`, `offer:<ride>:<attempt>`,
+`<trip>:dispute_resolved:<user>`) and written with `INSERT OR IGNORE`: repeated ticks,
+replayed accepts and retried requests never create a second one, and refused transitions
+create none.
+
+**Localized.** The row stores a `kind` and JSON parameters, not text. Text is rendered
+from a catalogue in English and Spanish in the **reader's** language
+(`notification_prefs.locale`); a push is written in the **recipient's** language, which the
+delivery list returns with each item.
+
+**Delivery.** The inbox is authoritative and always works (the bell polls every 15 s and
+toasts new items). Web push is sent peer-to-peer by the **client of the person whose action
+caused it** (`app.notifications.notifyUser`), because the app has no server-side sender. That
+client calls `list_pending_deliveries`, sends at most 5 per pass (the platform allows 30 per
+minute per sender and 10 per minute per recipient), and reports each result. A push tag
+equal to the notification id lets a device collapse a duplicate. The consequence: if the
+actor closes the app before delivery, the push waits until they next open it; items undelivered
+after 10 minutes are visible to ops (`ops_list_notification_issues`).
+
+**Retry policy** (tested in SQL): up to 3 attempts per channel, the second after 30 s and the
+third after 2 minutes; then the delivery is marked `failed` with the error text (100
+characters). Reports are accepted only from the actor, only while the delivery is
+unfinished, so a late success cannot resurrect a failed one.
+
+**Email and SMS fallback policy.** Explicit and opt-in.
+- Email is used only for **critical** kinds, only after push was skipped (the recipient turned
+  push off) or failed for good, and only if the recipient ticked the email checkbox in
+  Notification settings (consent time recorded; withdrawing clears it and immediately skips
+  anything queued). It goes through `notifyUser(..., {channel: 'email'})`: the platform sends
+  a fixed template to the verified account address with a one-click unsubscribe, and reports
+  `unsubscribed` / `no_address`, which is recorded as skipped and final.
+- **SMS is not offered.** The SDK only lets the app's creator send SMS, so the app cannot send
+  to riders or drivers; the old "text messages" toggle on the profile was removed.
+- Consent is never inferred: the default is email off, and the older profile toggles
+  from issue #3 are no longer read.
+
+**Retention and deletion.** A user's notifications older than 30 days are deleted whenever
+they mark things read. Account deletion removes their notifications and preferences. The
+platform allows a batch action 25 statements at most (the #9 deploy was rejected for it), so
+account deletion is now two idempotent actions, `delete_my_rider_data` and
+`delete_my_driver_data`; the app calls both.
+
+**Known gaps.** Push needs the browser permission and the actor's client to be running.
+Delivery results are only as accurate as the platform's `sent` count. Spanish copy has not
+been reviewed by a native speaker. The pending-delivery list is not shown to the recipient.
+
 ## Migrating legacy rides
 
 Existing rides live in localStorage (`loopride.rides.v2`, which already absorbs

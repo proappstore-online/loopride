@@ -130,6 +130,11 @@ describe('committed manifests satisfy the platform registration rules', () => {
     }
   })
 
+  it('stays inside the platform registration limits (the #9 deploy was rejected at 26 statements)', () => {
+    expect(tools.length).toBeLessThanOrEqual(120)
+    for (const t of tools) expect((t.statements ?? []).length, t.name).toBeLessThanOrEqual(25)
+  })
+
   it('migrations are additive only', () => {
     for (const m of migrationsFile.migrations) {
       for (const stmt of m.sql.split(';').map((s) => s.trim()).filter(Boolean)) {
@@ -443,7 +448,7 @@ describe('rider account data', () => {
     call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
     db.prepare('UPDATE drivers SET user_id = ?').run('driver-1')
     expect(call(db, 'list_driver_trips', {}, 'driver-1')).toHaveLength(1)
-    call(db, 'delete_my_rider_data', {}, 'driver-1')
+    call(db, 'delete_my_driver_data', {}, 'driver-1')
     expect(call(db, 'list_driver_trips', {}, 'driver-1')).toEqual([])
     expect(count(db, 'trips')).toBe(1)
   })
@@ -1801,7 +1806,7 @@ describe('live driver location', () => {
 
   it('a driver deleting their account erases their licence data, vehicles and location, and clears their live position', () => {
     matched(); drive('en_route'); publish('d1', NOW)
-    as('d1', 'delete_my_rider_data')
+    as('d1', 'delete_my_driver_data')
     for (const table of ['driver_applications', 'driver_vehicles', 'driver_availability', 'driver_locations', 'trip_locations'])
       expect(count(db, table), table).toBe(0)
     expect(count(db, 'driver_review_log')).toBeGreaterThan(0) // audit trail is retained
@@ -2099,6 +2104,341 @@ describe('fare statements, adjustments, receipts and reconciliation', () => {
         for (const param of Object.keys(t.params ?? {})) expect(param, `${t.name}.${param}`).not.toMatch(forbidden)
       const columns = (db.prepare("SELECT m.name AS tbl, p.name AS col FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type = 'table'").all() as { tbl: string; col: string }[])
       for (const { tbl, col } of columns) expect(col, `${tbl}.${col}`).not.toMatch(/card|cvc|cvv|iban|account_number|routing_number|secret|api_key/i)
+    })
+  })
+})
+
+describe('notifications', () => {
+  let db: Db
+  const NOW = Date.UTC(2026, 5, 1)
+  const MIN = 60_000
+  const SYDNEY = { lat: -33.8688, lng: 151.2093 }
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const as = (user: string, name: string, params: Record<string, unknown> = {}, now = NOW) => call(db, name, params, user, now)
+  const makeDriver = (id: string) => {
+    as(id, 'save_driver_application', { full_name: `Driver ${id}`, phone: '1', licence_number: id, licence_region: 'NSW', licence_expires: '2030-01-01', eligibility_confirmed: 1 })
+    as(id, 'save_driver_vehicle', { vehicle_id: `v-${id}`, plate: `PL-${id}`, make: 'T', model: 'C', vehicle_class: 'share' })
+    as(id, 'submit_driver_application')
+    as('ops', 'review_driver_application', { driver_user_id: id, decision: 'approved' })
+    as(id, 'update_driver_location', { ...SYDNEY, service_radius_km: 10 })
+    as(id, 'set_driver_availability', { available: 1, vehicle_id: `v-${id}` })
+  }
+  const request = (id = 'r1', rider = 'rider-1', driver = 'd1') => {
+    if (!db.prepare('SELECT 1 FROM drivers WHERE user_id = ?').get(driver)) makeDriver(driver)
+    db.prepare('UPDATE driver_availability SET available = CASE WHEN user_id = ? THEN 1 ELSE 0 END').run(driver)
+    as(rider, 'save_ride', { ...rideToRecords({ id, pickup: 'Central', pickupCoord: SYDNEY, dropoff: 'Airport', dropoffCoord: null, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share', fareCents: 1500 }) })
+    as(rider, 'request_dispatch', { request_id: id })
+  }
+  const matched = (id = 'r1', rider = 'rider-1', driver = 'd1') => {
+    request(id, rider, driver)
+    as(rider, 'dispatch_tick', { request_id: id })
+    as(driver, 'accept_offer', { rider_id: rider, request_id: id })
+  }
+  const trip = (id = 'r1', rider = 'rider-1') => ({ rider_id: rider, trip_id: `${id}:trip` })
+  const step = (to: string, driver = 'd1', now = NOW) => as(driver, 'advance_trip', { ...trip(), to_status: to }, now)
+  const inbox = (user: string) => db.prepare('SELECT id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id FROM notifications WHERE user_id = ? ORDER BY created_at, id').all(user) as Record<string, unknown>[]
+  const kinds = (user: string) => inbox(user).map((n) => n.kind)
+  const row = (user: string, id: string) => db.prepare('SELECT * FROM notifications WHERE user_id = ? AND id = ?').get(user, id) as Record<string, unknown>
+
+  describe('events', () => {
+    it('tells the driver about a new offer, once, linking to the driver home', () => {
+      request()
+      as('rider-1', 'dispatch_tick', { request_id: 'r1' })
+      as('rider-1', 'dispatch_tick', { request_id: 'r1' })
+      as('rider-1', 'dispatch_tick', { request_id: 'r1' })
+      expect(inbox('d1')).toHaveLength(1)
+      expect(inbox('d1')[0]).toMatchObject({ kind: 'offer_received', role: 'driver', link: '/driver', request_id: 'r1', rider_id: 'rider-1', critical: 0, actor_id: 'rider-1' })
+      expect(JSON.parse(inbox('d1')[0].params as string)).toMatchObject({ pickup: 'Central', dropoff: 'Airport' })
+      expect(inbox('rider-1')).toEqual([])
+    })
+
+    it('tells the rider the driver was assigned, with the driver and plate, linking to the trip', () => {
+      matched()
+      expect(inbox('rider-1')).toHaveLength(1)
+      expect(inbox('rider-1')[0]).toMatchObject({ kind: 'driver_assigned', role: 'rider', link: '/trip/r1', trip_id: 'r1:trip', request_id: 'r1', critical: 1, actor_id: 'd1' })
+      expect(JSON.parse(inbox('rider-1')[0].params as string)).toEqual({ driver: 'Driver d1', plate: 'PL-d1' })
+      as('d1', 'accept_offer', { rider_id: 'rider-1', request_id: 'r1' }) // replay
+      expect(inbox('rider-1')).toHaveLength(1)
+    })
+
+    it('follows the trip: en route, arrived, started, and a receipt on completion', () => {
+      matched()
+      step('en_route'); step('arrived'); as('d1', 'start_trip', trip()); step('completed')
+      expect(kinds('rider-1')).toEqual(expect.arrayContaining(['driver_assigned', 'driver_en_route', 'driver_arrived', 'trip_started', 'receipt_ready']))
+      expect(inbox('rider-1')).toHaveLength(5)
+      expect(inbox('rider-1').find((n) => n.kind === 'driver_arrived')).toMatchObject({ critical: 1, link: '/trip/r1' })
+      expect(inbox('rider-1').find((n) => n.kind === 'driver_en_route')).toMatchObject({ critical: 0 })
+      expect(JSON.parse(inbox('rider-1').find((n) => n.kind === 'receipt_ready')!.params as string)).toEqual({ total_cents: 1500 })
+      expect(inbox('d1').map((n) => n.kind)).toEqual(['offer_received']) // the driver is never told about their own actions
+    })
+
+    it('refused and repeated transitions queue nothing', () => {
+      matched()
+      step('arrived') // skips en_route
+      as('d1', 'start_trip', trip()) // not arrived
+      step('completed') // not started
+      expect(kinds('rider-1')).toEqual(['driver_assigned'])
+      step('en_route'); step('en_route'); step('en_route', 'd2'); as('rider-1', 'advance_trip', { ...trip(), to_status: 'arrived' })
+      expect(kinds('rider-1')).toEqual(['driver_assigned', 'driver_en_route'])
+    })
+
+    it.each([
+      ['the rider cancels', () => as('rider-1', 'cancel_ride', { request_id: 'r1', reason_code: 'wait_too_long' }, NOW + 3 * MIN), 'd1', 'trip_cancelled', { by: 'rider', reason: 'wait_too_long', fee_cents: 500 }, '/driver/trip/rider-1/r1'],
+      ['the driver cancels', () => as('d1', 'driver_cancel_trip', { ...trip(), reason_code: 'vehicle_issue' }), 'rider-1', 'trip_cancelled', { by: 'driver', reason: 'vehicle_issue', fee_cents: 0 }, '/trip/r1'],
+      ['the driver reports a rider no-show', () => { step('en_route'); step('arrived'); as('d1', 'report_rider_no_show', trip(), NOW + 6 * MIN) }, 'rider-1', 'rider_no_show', { fee_cents: 800 }, '/trip/r1'],
+      ['the rider reports a driver no-show', () => as('rider-1', 'report_driver_no_show', { request_id: 'r1' }, NOW + 16 * MIN), 'd1', 'driver_no_show', {}, '/driver/trip/rider-1/r1'],
+    ])('when %s, tells only the other party', (_name, act, recipient, kind, params, link) => {
+      matched()
+      act()
+      const n = inbox(recipient).find((x) => x.kind === kind)
+      expect(n).toMatchObject({ critical: 1, link, trip_id: 'r1:trip' })
+      expect(JSON.parse(n!.params as string)).toEqual(params)
+      const actor = recipient === 'd1' ? 'rider-1' : 'd1'
+      expect(inbox(actor).filter((x) => ['trip_cancelled', 'rider_no_show', 'driver_no_show'].includes(x.kind as string))).toEqual([])
+    })
+
+    it('an ops cancellation tells both the rider and the driver', () => {
+      matched()
+      as('ops', 'ops_cancel_trip', { ...trip(), note: 'incident', fee_cents: 0 })
+      expect(inbox('rider-1').find((n) => n.kind === 'trip_cancelled')).toMatchObject({ role: 'rider', link: '/trip/r1' })
+      expect(inbox('d1').find((n) => n.kind === 'trip_cancelled')).toMatchObject({ role: 'driver', link: '/driver/trip/rider-1/r1' })
+    })
+
+    it('a cancellation before any driver is assigned tells no one', () => {
+      request()
+      as('rider-1', 'cancel_ride', { request_id: 'r1' })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE kind = 'trip_cancelled'").get()).toEqual({ n: 0 })
+    })
+
+    it('a cancellation is notified once even if repeated', () => {
+      matched()
+      as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + 1)
+      as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + 2)
+      expect(inbox('d1').filter((n) => n.kind === 'trip_cancelled')).toHaveLength(1)
+    })
+
+    it('tells whoever opened a dispute how it was decided, linking to their own view of the trip', () => {
+      matched()
+      step('en_route'); step('arrived'); as('d1', 'start_trip', trip()); step('completed')
+      as('rider-1', 'open_dispute', { ...trip(), reason_code: 'overcharged' }, NOW + 1000)
+      as('d1', 'open_dispute', { ...trip(), reason_code: 'rider_conduct' }, NOW + 1000)
+      as('ops', 'ops_resolve_dispute', { ...trip(), opened_by: 'rider-1', decision: 'upheld', note: 'ok', waive_fee: 0 }, NOW + 2000)
+      as('ops', 'ops_resolve_dispute', { ...trip(), opened_by: 'd1', decision: 'rejected', note: 'no', waive_fee: 0 }, NOW + 2000)
+      expect(inbox('rider-1').find((n) => n.kind === 'dispute_resolved')).toMatchObject({ link: '/trip/r1', role: 'rider' })
+      expect(JSON.parse(inbox('rider-1').find((n) => n.kind === 'dispute_resolved')!.params as string)).toEqual({ decision: 'upheld' })
+      expect(inbox('d1').find((n) => n.kind === 'dispute_resolved')).toMatchObject({ link: '/driver/trip/rider-1/r1' })
+      expect(JSON.parse(inbox('d1').find((n) => n.kind === 'dispute_resolved')!.params as string)).toEqual({ decision: 'rejected' })
+      as('ops', 'ops_resolve_dispute', { ...trip(), opened_by: 'rider-1', decision: 'rejected', note: 'again', waive_fee: 0 }, NOW + 3000) // already resolved
+      expect(inbox('rider-1').filter((n) => n.kind === 'dispute_resolved')).toHaveLength(1)
+    })
+
+    it('keeps notifications separate per person', () => {
+      matched('r1', 'rider-1', 'd1')
+      matched('r2', 'rider-2', 'd2')
+      expect(inbox('rider-1').every((n) => n.rider_id === 'rider-1')).toBe(true)
+      expect(inbox('rider-2').every((n) => n.rider_id === 'rider-2')).toBe(true)
+      expect(as('rider-1', 'list_my_notifications')).toHaveLength(1)
+      expect(as('rider-2', 'list_my_notifications')).toHaveLength(1)
+      expect(as('d3', 'list_my_notifications')).toEqual([])
+    })
+  })
+
+  describe('inbox', () => {
+    it('marks one or all read, only for the owner, and purges after 30 days', () => {
+      matched(); step('en_route')
+      const ids = (as('rider-1', 'list_my_notifications') as { id: string }[]).map((n) => n.id)
+      as('rider-2', 'mark_notifications_read', {})
+      expect(db.prepare('SELECT COUNT(*) AS n FROM notifications WHERE read_at IS NOT NULL').get()).toEqual({ n: 0 })
+      as('rider-1', 'mark_notifications_read', { id: ids[0] }, NOW + 5)
+      expect((as('rider-1', 'list_my_notifications') as { read_at: number | null }[]).filter((n) => n.read_at !== null)).toHaveLength(1)
+      as('rider-1', 'mark_notifications_read', {}, NOW + 6)
+      expect((as('rider-1', 'list_my_notifications') as { read_at: number | null }[]).every((n) => n.read_at !== null)).toBe(true)
+      as('rider-1', 'mark_notifications_read', {}, NOW + 30 * 24 * 60 * MIN + 1)
+      expect(as('rider-1', 'list_my_notifications')).toEqual([])
+    })
+
+    it('is erased with the account, along with preferences', () => {
+      matched()
+      as('rider-1', 'set_notification_prefs', { locale: 'es', push: 1, email_fallback: 1 })
+      as('rider-1', 'delete_my_rider_data')
+      expect(count(db, 'notification_prefs')).toBe(0)
+      expect(inbox('rider-1')).toEqual([])
+      expect(inbox('d1')).toHaveLength(1) // the driver's own offer is theirs
+    })
+  })
+
+  describe('preferences and consent', () => {
+    const prefs = (user = 'rider-1') => as(user, 'get_notification_prefs')[0] as Record<string, unknown> | undefined
+
+    it('defaults to push on and email off, with no consent recorded', () => {
+      expect(prefs()).toBeUndefined()
+      matched()
+      expect(row('rider-1', 'r1:trip:driver_assigned')).toMatchObject({ push_status: 'pending', email_status: 'none' })
+    })
+
+    it('records email consent with its time, keeps the first time, and clears it on withdrawal', () => {
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 1, email_fallback: 1 }, NOW)
+      expect(prefs()).toMatchObject({ email_fallback: 1, email_consent_at: NOW })
+      as('rider-1', 'set_notification_prefs', { locale: 'es', push: 1, email_fallback: 1 }, NOW + 5000)
+      expect(prefs()).toMatchObject({ locale: 'es', email_consent_at: NOW })
+      as('rider-1', 'set_notification_prefs', { locale: 'es', push: 1, email_fallback: 0 }, NOW + 6000)
+      expect(prefs()).toMatchObject({ email_fallback: 0, email_consent_at: null })
+    })
+
+    it('rejects unknown languages and invalid flags', () => {
+      as('rider-1', 'set_notification_prefs', { locale: 'xx', push: 1, email_fallback: 0 })
+      expect(prefs()).toMatchObject({ locale: 'en' })
+      expect(() => as('rider-1', 'set_notification_prefs', { locale: 'en', push: 2, email_fallback: 0 })).toThrow()
+      expect(() => as('rider-1', 'set_notification_prefs', { locale: 'en', push: 1, email_fallback: 1.5 as number })).toThrow()
+    })
+
+    it('skips push for someone who turned it off, and queues email only for a consenting person', () => {
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 0, email_fallback: 0 })
+      as('rider-2', 'set_notification_prefs', { locale: 'en', push: 0, email_fallback: 1 })
+      matched('r1', 'rider-1', 'd1'); matched('r2', 'rider-2', 'd2')
+      expect(row('rider-1', 'r1:trip:driver_assigned')).toMatchObject({ push_status: 'skipped', email_status: 'none' }) // no consent, no email
+      expect(row('rider-2', 'r2:trip:driver_assigned')).toMatchObject({ push_status: 'skipped', email_status: 'pending' })
+    })
+
+    it('never emails non-critical notifications', () => {
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 0, email_fallback: 1 })
+      matched(); step('en_route')
+      expect(row('rider-1', 'r1:trip:driver_en_route')).toMatchObject({ critical: 0, email_status: 'none' })
+    })
+
+    it('withdrawing a channel takes effect on notifications already waiting', () => {
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 1, email_fallback: 1 })
+      matched()
+      expect(row('rider-1', 'r1:trip:driver_assigned')).toMatchObject({ push_status: 'pending' })
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 0, email_fallback: 0 })
+      expect(row('rider-1', 'r1:trip:driver_assigned')).toMatchObject({ push_status: 'skipped', push_next_at: null })
+      expect(as('d1', 'list_pending_deliveries')).toEqual([])
+    })
+  })
+
+  describe('delivery, retries and observability', () => {
+    const pending = (user = 'd1', now = NOW) => as(user, 'list_pending_deliveries', {}, now) as { recipient: string; id: string; channel: string; locale: string; kind: string }[]
+    const pushResult = (outcome: string, now = NOW, who = 'd1', error?: string) => as(who, 'report_push_result', { recipient: 'rider-1', notification_id: 'r1:trip:driver_assigned', outcome, error }, now)
+    const emailResult = (outcome: string, now = NOW, who = 'd1', error?: string) => as(who, 'report_email_result', { recipient: 'rider-1', notification_id: 'r1:trip:driver_assigned', outcome, error }, now)
+    const status = () => row('rider-1', 'r1:trip:driver_assigned')
+
+    it('only the person whose action caused a notification can deliver or report it', () => {
+      matched()
+      expect(pending('d1')).toMatchObject([{ recipient: 'rider-1', id: 'r1:trip:driver_assigned', channel: 'push', kind: 'driver_assigned' }])
+      expect(pending('rider-1')).toMatchObject([{ recipient: 'd1', kind: 'offer_received' }]) // the rider only owes the push their own tick caused
+      expect(pending('d2')).toEqual([])
+      pushResult('sent', NOW, 'rider-1'); pushResult('sent', NOW, 'ops'); pushResult('sent', NOW, 'd2')
+      expect(status()).toMatchObject({ push_status: 'pending', push_attempts: 0 })
+      pushResult('sent')
+      expect(status()).toMatchObject({ push_status: 'sent', push_attempts: 1, push_next_at: null })
+      expect(pending('d1')).toEqual([]) // delivered: not listed again
+    })
+
+    it('writes the message in the recipient\'s language', () => {
+      as('rider-1', 'set_notification_prefs', { locale: 'es', push: 1, email_fallback: 0 })
+      matched()
+      expect(pending('d1')[0]).toMatchObject({ locale: 'es' })
+    })
+
+    it('retries a failed push after 30 seconds, then 2 minutes, then gives up and records the error', () => {
+      matched()
+      pushResult('failed', NOW, 'd1', 'rate limited')
+      expect(status()).toMatchObject({ push_status: 'retry', push_attempts: 1, push_next_at: NOW + 30_000, push_error: 'rate limited' })
+      expect(pending('d1', NOW + 29_999)).toEqual([]) // not due yet
+      expect(pending('d1', NOW + 30_000)).toHaveLength(1)
+      pushResult('failed', NOW + 30_000, 'd1', 'rate limited')
+      expect(status()).toMatchObject({ push_status: 'retry', push_attempts: 2, push_next_at: NOW + 30_000 + 120_000 })
+      expect(pending('d1', NOW + 149_999)).toEqual([])
+      pushResult('failed', NOW + 150_000, 'd1', 'x'.repeat(300))
+      expect(status()).toMatchObject({ push_status: 'failed', push_attempts: 3, push_next_at: null })
+      expect(String(status().push_error)).toHaveLength(100)
+      expect(pending('d1', NOW + 10 * MIN)).toEqual([]) // no further attempts
+      pushResult('sent', NOW + 10 * MIN) // a late success cannot resurrect it
+      expect(status()).toMatchObject({ push_status: 'failed', push_attempts: 3 })
+    })
+
+    it('a success after a retry ends the cycle', () => {
+      matched()
+      pushResult('failed')
+      pushResult('sent', NOW + 31_000)
+      expect(status()).toMatchObject({ push_status: 'sent', push_attempts: 2 })
+    })
+
+    it('rejects an unknown outcome and repeated reports of a finished delivery', () => {
+      matched()
+      pushResult('maybe')
+      expect(status()).toMatchObject({ push_attempts: 0 })
+      pushResult('sent'); pushResult('sent'); pushResult('failed')
+      expect(status()).toMatchObject({ push_status: 'sent', push_attempts: 1 })
+    })
+
+    it('falls back to email only after push has failed for good, for a critical notification and a consenting recipient', () => {
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 1, email_fallback: 1 })
+      matched()
+      expect(status()).toMatchObject({ email_status: 'none' })
+      pushResult('failed'); pushResult('failed', NOW + 30_000); pushResult('failed', NOW + 150_000)
+      expect(status()).toMatchObject({ push_status: 'failed', email_status: 'pending' })
+      expect(pending('d1', NOW + 150_000)).toMatchObject([{ channel: 'email', id: 'r1:trip:driver_assigned' }])
+    })
+
+    it('does not email when push failed for someone who never consented', () => {
+      matched()
+      pushResult('failed'); pushResult('failed', NOW + 30_000); pushResult('failed', NOW + 150_000)
+      expect(status()).toMatchObject({ push_status: 'failed', email_status: 'none' })
+    })
+
+    it('does not email a push that succeeded', () => {
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 1, email_fallback: 1 })
+      matched(); pushResult('sent')
+      expect(status()).toMatchObject({ email_status: 'none' })
+    })
+
+    it('does not send an email once consent is withdrawn', () => {
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 0, email_fallback: 1 })
+      matched()
+      expect(pending('d1')).toMatchObject([{ channel: 'email' }])
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 0, email_fallback: 0 })
+      expect(pending('d1')).toEqual([])
+      expect(status()).toMatchObject({ email_status: 'skipped' })
+    })
+
+    it('records email outcomes: sent, skipped when the platform says unsubscribed, and retries before failing', () => {
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 0, email_fallback: 1 })
+      matched()
+      emailResult('sent')
+      expect(status()).toMatchObject({ email_status: 'sent', email_attempts: 1 })
+      db = new DatabaseSync(':memory:'); migrate(db, new Set())
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 0, email_fallback: 1 })
+      matched()
+      emailResult('skipped', NOW, 'd1', 'unsubscribed')
+      expect(status()).toMatchObject({ email_status: 'skipped', email_error: 'unsubscribed' })
+      db = new DatabaseSync(':memory:'); migrate(db, new Set())
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 0, email_fallback: 1 })
+      matched()
+      emailResult('failed', NOW); emailResult('failed', NOW + 30_000); emailResult('failed', NOW + 150_000)
+      expect(status()).toMatchObject({ email_status: 'failed', email_attempts: 3 })
+      expect(as('d1', 'report_email_result', { recipient: 'rider-1', notification_id: 'r1:trip:driver_assigned', outcome: 'sent' }, NOW + MIN)).toBeUndefined()
+      expect(status()).toMatchObject({ email_status: 'failed' })
+    })
+
+    it('shows ops the failures and the notifications nobody has delivered, without message content', () => {
+      expect(tool('ops_list_notification_issues')).toMatchObject({ auth: { required: true, app_roles: ['ops'] } })
+      as('rider-1', 'set_notification_prefs', { locale: 'en', push: 1, email_fallback: 1 })
+      matched()
+      const mineOnly = (now: number) => (as('ops', 'ops_list_notification_issues', {}, now) as { user_id: string }[]).filter((i) => i.user_id === 'rider-1')
+      expect(as('ops', 'ops_list_notification_issues', {}, NOW + 5 * MIN)).toEqual([]) // fresh and pending is normal
+      expect(mineOnly(NOW + 11 * MIN)).toMatchObject([{ user_id: 'rider-1', id: 'r1:trip:driver_assigned', code: 'undelivered', detail: 'push pending' }])
+      pushResult('failed'); pushResult('failed', NOW + 30_000); pushResult('failed', NOW + 150_000, 'd1', 'no subscription')
+      const codes = (mineOnly(NOW + 160_000) as unknown as { code: string }[]).map((i) => i.code)
+      expect(codes).toEqual(['push_failed'])
+      emailResult('failed', NOW + 160_000, 'd1', 'smtp'); emailResult('failed', NOW + 200_000); emailResult('failed', NOW + 400_000)
+      expect((mineOnly(NOW + 500_000) as unknown as { code: string }[]).map((i) => i.code).sort()).toEqual(['email_failed', 'push_failed'])
+      expect(JSON.stringify(as('ops', 'ops_list_notification_issues', {}, NOW + 500_000))).not.toContain('Driver d1')
     })
   })
 })

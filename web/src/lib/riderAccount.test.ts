@@ -106,6 +106,7 @@ describe('export and deletion', () => {
     actions.call.mockResolvedValue(undefined)
     await eraseRiderData()
     expect(actions.call).toHaveBeenCalledWith('delete_my_rider_data', {})
+    expect(actions.call).toHaveBeenCalledWith('delete_my_driver_data', {}) // a batch is limited to 25 statements, so there are two
     expect(kv.delete).toHaveBeenCalledWith('rides.v1')
     expect(listRides()).toEqual([])
   })

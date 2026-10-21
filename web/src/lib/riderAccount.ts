@@ -23,7 +23,7 @@ export interface RiderProfile {
 export const DEFAULT_PROFILE: RiderProfile = {
   displayName: '',
   phone: '',
-  notifyEmail: true,
+  notifyEmail: false,
   notifySms: false,
   notifyTripUpdates: true,
 }
@@ -182,7 +182,9 @@ export async function exportAccountData(): Promise<Record<string, unknown>> {
 
 /** Erase the rider's DB rows, synced KV copy and local cache. Does not delete the platform login. */
 export async function eraseRiderData(): Promise<void> {
+  // Two actions: the platform limits one batch to 25 statements. Both are idempotent, so a failure part-way is safe to retry.
   await app.actions.call('delete_my_rider_data', {})
+  await app.actions.call('delete_my_driver_data', {})
   await app.kv.delete(KV_KEYS.rides)
   clearLocalRides()
 }

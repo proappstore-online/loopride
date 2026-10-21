@@ -78,14 +78,21 @@ describe('Account (signed in)', () => {
     expect(screen.getByRole('region', { name: 'Receipts' })).toBeInTheDocument()
   })
 
-  it('saves contact preferences', async () => {
+  it('saves the profile', async () => {
     mount()
     await userEvent.type(await screen.findByLabelText('Name'), 'Sam')
-    await userEvent.click(screen.getByLabelText('Text messages'))
     await userEvent.click(screen.getByRole('button', { name: 'Save profile' }))
     await waitFor(() =>
-      expect(actions.call).toHaveBeenCalledWith('save_rider_profile', expect.objectContaining({ display_name: 'Sam', notify_sms: 1 })),
+      expect(actions.call).toHaveBeenCalledWith('save_rider_profile', expect.objectContaining({ display_name: 'Sam' })),
     )
+  })
+
+  it('has one place for notification choices, and no text-message option', async () => {
+    mount()
+    expect(await screen.findByRole('region', { name: 'Notifications' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Text messages')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Email receipts')).not.toBeInTheDocument()
+    expect(screen.getByText('Text messages are not available.')).toBeInTheDocument()
   })
 
   it('lists, adds and removes saved places', async () => {
@@ -107,5 +114,6 @@ describe('Account (signed in)', () => {
     await userEvent.click(button)
     await waitFor(() => expect(deleteAccount).toHaveBeenCalled())
     expect(actions.call).toHaveBeenCalledWith('delete_my_rider_data', {})
+    expect(actions.call).toHaveBeenCalledWith('delete_my_driver_data', {})
   })
 })
