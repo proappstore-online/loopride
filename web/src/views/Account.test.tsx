@@ -56,6 +56,7 @@ describe('Account (signed in)', () => {
           { id: 'r1', booking_type: 'now', status: 'cancelled', pickup_label: 'A', dropoff_label: 'Gone trip', trip_status: 'cancelled', fare_cents: 1250, updated_at: 1_700_000_000_000 },
           { id: 'r2', booking_type: 'now', status: 'completed', pickup_label: 'C', dropoff_label: 'Done trip', trip_status: 'completed', fare_cents: null, updated_at: 1_700_000_000_000 },
         ]
+      if (name === 'list_my_receipts') return [{ receipt_no: 'RCT-9', trip_id: 't', request_id: 'r', basis: 'fare', currency: 'USD', quoted_cents: 1000, base_cents: null, distance_cents: null, time_cents: null, booking_fee_cents: null, min_adjust_cents: null, surge_milli: null, final_cents: 1000, tax_rate_bp: 0, tax_cents: 0, credits_cents: 0, total_cents: 1000, pickup_label: 'Home', dropoff_label: 'Work', finalized_at: 1 }]
       if (name === 'list_saved_places') return [{ id: 'p1', label: 'Home', address: '1 Main St', lat: null, lng: null }]
       return []
     })
@@ -69,6 +70,12 @@ describe('Account (signed in)', () => {
     await userEvent.click(screen.getByRole('tab', { name: 'Completed (1)' }))
     expect(screen.getByText('Done trip')).toBeInTheDocument()
     expect(screen.queryByRole('note')).not.toBeInTheDocument()
+  })
+
+  it('lists the rider\'s receipts', async () => {
+    mount()
+    expect(await screen.findByRole('region', { name: 'Receipt' })).toHaveTextContent('RCT-9')
+    expect(screen.getByRole('region', { name: 'Receipts' })).toBeInTheDocument()
   })
 
   it('saves contact preferences', async () => {

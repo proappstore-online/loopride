@@ -1814,3 +1814,291 @@ describe('live driver location', () => {
     expect(count(db, 'fare_quotes')).toBe(0)
   })
 })
+
+describe('fare statements, adjustments, receipts and reconciliation', () => {
+  let db: Db
+  const NOW = Date.UTC(2026, 5, 1)
+  const MIN = 60_000
+  const SYDNEY = { lat: -33.8688, lng: 151.2093 }
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const as = (user: string, name: string, params: Record<string, unknown> = {}, now = NOW) => call(db, name, params, user, now)
+  const makeDriver = (id: string) => {
+    as(id, 'save_driver_application', { full_name: id, phone: '1', licence_number: id, licence_region: 'NSW', licence_expires: '2030-01-01', eligibility_confirmed: 1 })
+    as(id, 'save_driver_vehicle', { vehicle_id: `v-${id}`, plate: id, make: 'T', model: 'C', vehicle_class: 'share' })
+    as(id, 'submit_driver_application')
+    as('ops', 'review_driver_application', { driver_user_id: id, decision: 'approved' })
+    as(id, 'update_driver_location', { ...SYDNEY, service_radius_km: 10 })
+    as(id, 'set_driver_availability', { available: 1, vehicle_id: `v-${id}` })
+  }
+  const matched = (id = 'r1', rider = 'rider-1', driver = 'd1', fareCents = 1500) => {
+    if (!db.prepare('SELECT 1 FROM drivers WHERE user_id = ?').get(driver)) makeDriver(driver)
+    db.prepare('UPDATE driver_availability SET available = CASE WHEN user_id = ? THEN 1 ELSE 0 END').run(driver) // only this driver can be offered the ride
+    as(rider, 'save_ride', { ...rideToRecords({ id, pickup: 'Central', pickupCoord: SYDNEY, dropoff: 'Airport', dropoffCoord: null, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share', fareCents }) })
+    as(rider, 'request_dispatch', { request_id: id })
+    as(rider, 'dispatch_tick', { request_id: id })
+    as(driver, 'accept_offer', { rider_id: rider, request_id: id })
+  }
+  const tripOf = (id = 'r1', rider = 'rider-1') => ({ rider_id: rider, trip_id: `${id}:trip` })
+  const step = (to: string, driver = 'd1', id = 'r1', rider = 'rider-1', now = NOW) => as(driver, 'advance_trip', { ...tripOf(id, rider), to_status: to }, now)
+  const complete = (id = 'r1', rider = 'rider-1', driver = 'd1') => {
+    step('en_route', driver, id, rider); step('arrived', driver, id, rider)
+    as(driver, 'start_trip', tripOf(id, rider))
+    step('completed', driver, id, rider)
+  }
+  const statements = () => db.prepare('SELECT * FROM fare_statements ORDER BY trip_id').all() as Record<string, unknown>[]
+  const statement = (trip = 'r1:trip') => db.prepare('SELECT * FROM fare_statements WHERE trip_id = ?').get(trip) as Record<string, unknown> | undefined
+  const issues = () => as('ops', 'ops_reconcile') as { trip_id: string; code: string }[]
+  const credit = (extra: Record<string, unknown> = {}, who = 'ops') =>
+    as(who, 'ops_credit_trip', { ...tripOf(), request_key: 'k1', amount_cents: 300, reason_code: 'goodwill', note: 'sorry', ...extra })
+
+  describe('finalization', () => {
+    it('writes one immutable statement when a trip completes, from the accepted quote', () => {
+      matched('r1', 'rider-1', 'd1', 1500)
+      expect(statements()).toEqual([]) // nothing while the trip is open
+      complete()
+      expect(statements()).toHaveLength(1)
+      expect(statement()).toMatchObject({ rider_id: 'rider-1', request_id: 'r1', driver_user_id: 'd1', basis: 'fare', currency: 'USD', quoted_cents: 1500, final_cents: 1500, tax_rate_bp: 0, tax_cents: 0, commission_bp: 0, platform_fee_cents: 0, driver_payout_cents: 1500, policy_version: 'v0-unconfigured', outcome: 'completed', pickup_label: 'Central', dropoff_label: 'Airport', finalized_at: NOW })
+      expect(String(statement()?.receipt_no)).toMatch(/^RCT-[0-9a-f]{8}$/)
+      expect(issues()).toEqual([])
+    })
+
+    it('snapshots the quote components when the ride came from a server quote', () => {
+      makeDriver('d1')
+      as('rider-1', 'create_quote', { quote_id: 'q1', vehicle_class: 'share', pickup_label: 'Central', pickup_lat: SYDNEY.lat, pickup_lng: SYDNEY.lng, dropoff_label: 'Airport', dropoff_lat: SYDNEY.lat + 0.045, dropoff_lng: SYDNEY.lng, distance_m: 5000, duration_s: 600 })
+      as('rider-1', 'accept_quote', { quote_id: 'q1', ride_id: 'ride-q', client_record: '{}', pickup_lat: SYDNEY.lat, pickup_lng: SYDNEY.lng, dropoff_lat: SYDNEY.lat + 0.045, dropoff_lng: SYDNEY.lng, distance_m: 5000 })
+      as('rider-1', 'dispatch_tick', { request_id: 'ride-q' })
+      as('d1', 'accept_offer', { rider_id: 'rider-1', request_id: 'ride-q' })
+      complete('ride-q')
+      expect(statement('ride-q:trip')).toMatchObject({ quote_id: 'q1', quoted_cents: 1150, base_cents: 200, distance_cents: 550, time_cents: 250, booking_fee_cents: 150, min_adjust_cents: 0, surge_milli: 1000, final_cents: 1150, basis: 'fare' })
+      expect(issues()).toEqual([])
+    })
+
+    it.each([
+      ['rider cancels in the grace period', () => as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + 60_000), 'none', 0, 'rider_cancelled'],
+      ['rider cancels late', () => as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + 3 * MIN), 'cancellation_fee', 500, 'rider_cancelled'],
+      ['rider cancels after the driver arrived', () => { step('en_route'); step('arrived'); as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + MIN) }, 'cancellation_fee', 800, 'rider_cancelled'],
+      ['driver cancels', () => as('d1', 'driver_cancel_trip', { ...tripOf(), reason_code: 'safety' }), 'none', 0, 'driver_cancelled'],
+      ['rider does not show', () => { step('en_route'); step('arrived'); as('d1', 'report_rider_no_show', tripOf(), NOW + 6 * MIN) }, 'no_show_fee', 800, 'rider_no_show'],
+      ['driver does not show', () => as('rider-1', 'report_driver_no_show', { request_id: 'r1' }, NOW + 16 * MIN), 'none', 0, 'driver_no_show'],
+      ['ops cancels with a fee', () => as('ops', 'ops_cancel_trip', { ...tripOf(), note: 'incident', fee_cents: 400 }), 'cancellation_fee', 400, 'ops_cancelled'],
+    ])('finalizes a statement when %s', (_name, end, basis, fee, outcome) => {
+      matched('r1', 'rider-1', 'd1', 1500)
+      end()
+      expect(statement()).toMatchObject({ basis, final_cents: fee, driver_payout_cents: fee, outcome })
+      expect(issues()).toEqual([])
+    })
+
+    it('refused and repeated calls create no statement and never a second one', () => {
+      matched()
+      step('arrived') // out of order
+      as('d1', 'advance_trip', { ...tripOf(), to_status: 'completed' })
+      expect(statements()).toEqual([])
+      complete()
+      step('completed') // repeat
+      as('rider-1', 'cancel_ride', { request_id: 'r1' }) // cannot cancel a finished trip
+      as('d1', 'driver_cancel_trip', { ...tripOf(), reason_code: 'other' })
+      expect(statements()).toHaveLength(1)
+      expect(statement()).toMatchObject({ basis: 'fare', final_cents: 1500 })
+    })
+
+    it('never changes after the fact: later edits to the quote or lifecycle leave it as it was, and reconciliation flags the drift', () => {
+      matched(); complete()
+      const before = statement()
+      db.prepare("UPDATE quotes SET fare_cents = 9999 WHERE request_id = 'r1'").run()
+      as('rider-1', 'save_ride', { ...rideToRecords({ id: 'r1', pickup: 'Edited', pickupCoord: SYDNEY, dropoff: 'Edited', dropoffCoord: null, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share', fareCents: 7777 }) }, NOW + 10_000)
+      expect(statement()).toEqual(before)
+      expect(issues()).toEqual([{ rider_id: 'rider-1', trip_id: 'r1:trip', code: 'quote_changed', detail: expect.any(String) }].map(({ trip_id, code }) => ({ trip_id, code })).map((i) => expect.objectContaining(i)))
+    })
+
+    it('uses distinct receipt numbers', () => {
+      matched('r1'); complete('r1')
+      matched('r2', 'rider-2', 'd2'); complete('r2', 'rider-2', 'd2')
+      const numbers = statements().map((s) => s.receipt_no)
+      expect(new Set(numbers).size).toBe(2)
+    })
+  })
+
+  describe('receipts', () => {
+    it('shows the rider the statement, scoped to their own rides', () => {
+      matched(); complete()
+      const [receipt] = as('rider-1', 'get_receipt', { request_id: 'r1' }) as Record<string, unknown>[]
+      expect(receipt).toMatchObject({ trip_id: 'r1:trip', basis: 'fare', final_cents: 1500, credits_cents: 0, total_cents: 1500, tax_cents: 0, pickup_label: 'Central', dropoff_label: 'Airport' })
+      expect(as('rider-2', 'get_receipt', { request_id: 'r1' })).toEqual([])
+      expect(as('d1', 'get_receipt', { request_id: 'r1' })).toEqual([])
+      expect(as('rider-1', 'list_my_receipts')).toHaveLength(1)
+      expect(as('rider-2', 'list_my_receipts')).toEqual([])
+    })
+
+    it('gives the driver an accrual view of only their own trips', () => {
+      matched(); complete()
+      matched('r2', 'rider-2', 'd2'); complete('r2', 'rider-2', 'd2')
+      expect(as('d1', 'list_my_earnings')).toMatchObject([{ trip_id: 'r1:trip', final_cents: 1500, driver_payout_cents: 1500, platform_fee_cents: 0, policy_version: 'v0-unconfigured' }])
+      expect(as('rider-1', 'list_my_earnings')).toEqual([])
+    })
+  })
+
+  describe('credits', () => {
+    it('credits part of a finished trip without touching the statement', () => {
+      matched(); complete()
+      const before = statement()
+      credit({ amount_cents: 300 })
+      credit({ request_key: 'k2', amount_cents: 200, reason_code: 'fare_error' })
+      expect(statement()).toEqual(before)
+      expect(as('rider-1', 'get_receipt', { request_id: 'r1' })).toMatchObject([{ final_cents: 1500, credits_cents: 500, total_cents: 1000 }])
+      expect(as('rider-1', 'list_receipt_adjustments', { trip_id: 'r1:trip' })).toMatchObject([{ kind: 'credit', amount_cents: 300, reason_code: 'goodwill' }, { amount_cents: 200, reason_code: 'fare_error' }])
+      expect(issues()).toEqual([])
+    })
+
+    it('can never exceed the final amount, in one credit or across several', () => {
+      matched(); complete()
+      credit({ request_key: 'a', amount_cents: 1501 })
+      expect(count(db, 'fare_adjustments')).toBe(0)
+      credit({ request_key: 'b', amount_cents: 1000 })
+      credit({ request_key: 'c', amount_cents: 501 })
+      expect(count(db, 'fare_adjustments')).toBe(1)
+      credit({ request_key: 'd', amount_cents: 500 })
+      expect(as('rider-1', 'get_receipt', { request_id: 'r1' })).toMatchObject([{ total_cents: 0 }])
+      credit({ request_key: 'e', amount_cents: 1 })
+      expect(count(db, 'fare_adjustments')).toBe(2)
+    })
+
+    it('rejects invalid input: no amount, bad reason, no note, no key, unfinished trips', () => {
+      matched()
+      credit() // trip not finished: no statement
+      complete()
+      credit({ amount_cents: 0 }); credit({ amount_cents: -5 })
+      credit({ reason_code: 'dispute_waiver' }) // reserved for the dispute flow
+      credit({ reason_code: 'bribe' })
+      credit({ note: '  ' }); credit({ request_key: '  ' })
+      credit({ trip_id: 'nope:trip' }); credit({ rider_id: 'rider-9' })
+      expect(count(db, 'fare_adjustments')).toBe(0)
+    })
+
+    it('is idempotent on the request key, so a retry never double-credits', () => {
+      matched(); complete()
+      credit(); credit(); credit({ amount_cents: 999 }) // same key, even with a different amount
+      expect(as('rider-1', 'list_receipt_adjustments', { trip_id: 'r1:trip' })).toHaveLength(1)
+      expect(as('rider-1', 'get_receipt', { request_id: 'r1' })).toMatchObject([{ credits_cents: 300 }])
+    })
+
+    it('is ops-only in the manifest, and ops cannot credit trips they rode or drove', () => {
+      expect(tool('ops_credit_trip')).toMatchObject({ auth: { required: true, app_roles: ['ops'] } })
+      expect(tool('ops_reconcile')).toMatchObject({ auth: { required: true, app_roles: ['ops'] } })
+      matched('r1', 'ops-rider', 'd1'); complete('r1', 'ops-rider')
+      as('ops-rider', 'ops_credit_trip', { ...tripOf('r1', 'ops-rider'), request_key: 'k', amount_cents: 100, reason_code: 'goodwill', note: 'self' })
+      as('d1', 'ops_credit_trip', { ...tripOf('r1', 'ops-rider'), request_key: 'k', amount_cents: 100, reason_code: 'goodwill', note: 'self' })
+      expect(count(db, 'fare_adjustments')).toBe(0)
+      expect(as('ops-rider', 'ops_reconcile')).toEqual([])
+    })
+
+    it('a dispute fee waiver becomes a credit against the unchanged statement and reconciles', () => {
+      matched()
+      as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + 3 * MIN)
+      expect(statement()).toMatchObject({ basis: 'cancellation_fee', final_cents: 500 })
+      as('rider-1', 'open_dispute', { ...tripOf(), reason_code: 'cancel_fee' }, NOW + 4 * MIN)
+      as('ops', 'ops_resolve_dispute', { ...tripOf(), opened_by: 'rider-1', decision: 'upheld', note: 'driver was late', waive_fee: 1 }, NOW + 5 * MIN)
+      expect(statement()).toMatchObject({ final_cents: 500 })
+      expect(as('rider-1', 'get_receipt', { request_id: 'r1' })).toMatchObject([{ final_cents: 500, credits_cents: 500, total_cents: 0 }])
+      expect(as('rider-1', 'list_receipt_adjustments', { trip_id: 'r1:trip' })).toMatchObject([{ reason_code: 'dispute_waiver', amount_cents: 500 }])
+      expect(issues()).toEqual([])
+    })
+
+    it('a rejected dispute leaves the receipt alone', () => {
+      matched()
+      as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + 3 * MIN)
+      as('rider-1', 'open_dispute', { ...tripOf(), reason_code: 'cancel_fee' }, NOW + 4 * MIN)
+      as('ops', 'ops_resolve_dispute', { ...tripOf(), opened_by: 'rider-1', decision: 'rejected', note: 'policy applied', waive_fee: 1 }, NOW + 5 * MIN)
+      expect(count(db, 'fare_adjustments')).toBe(0)
+      expect(as('rider-1', 'get_receipt', { request_id: 'r1' })).toMatchObject([{ total_cents: 500 }])
+    })
+  })
+
+  describe('reconciliation', () => {
+    const codes = () => issues().map((i) => i.code)
+
+    it('is clean across completed, cancelled, credited and no-show trips', () => {
+      matched('r1'); complete('r1')
+      matched('r2', 'rider-2', 'd2'); as('rider-2', 'cancel_ride', { request_id: 'r2' }, NOW + 3 * MIN)
+      matched('r3', 'rider-3', 'd3'); as('d3', 'driver_cancel_trip', { ...tripOf('r3', 'rider-3'), reason_code: 'other' })
+      credit({ amount_cents: 100 })
+      expect(issues()).toEqual([])
+    })
+
+    it('flags a finished trip with no statement', () => {
+      matched(); complete()
+      db.prepare('DELETE FROM fare_statements').run()
+      expect(codes()).toEqual(['missing_statement'])
+    })
+
+    it.each([
+      ['fare_not_quote', "UPDATE fare_statements SET final_cents = 1400, driver_payout_cents = 1400"],
+      ['payout_mismatch', 'UPDATE fare_statements SET driver_payout_cents = 1000'],
+      ['credits_exceed_final', "INSERT INTO fare_adjustments (rider_id, id, trip_id, kind, amount_cents, reason_code, actor_id, created_at) VALUES ('rider-1', 'x', 'r1:trip', 'credit', 2000, 'other', 'ops', 1)"],
+      ['refunds_without_payment', "INSERT INTO fare_adjustments (rider_id, id, trip_id, kind, amount_cents, reason_code, actor_id, created_at) VALUES ('rider-1', 'x', 'r1:trip', 'refund', 100, 'other', 'ops', 1)"],
+      ['adjustment_without_statement', "INSERT INTO fare_adjustments (rider_id, id, trip_id, kind, amount_cents, reason_code, actor_id, created_at) VALUES ('rider-1', 'x', 'ghost:trip', 'credit', 100, 'other', 'ops', 1)"],
+    ])('detects %s', (code, sql) => {
+      matched(); complete()
+      db.prepare(sql).run()
+      expect(codes()).toContain(code)
+    })
+
+    it('detects component totals that do not add up to the quote', () => {
+      makeDriver('d1')
+      as('rider-1', 'create_quote', { quote_id: 'q1', vehicle_class: 'share', pickup_label: 'A', pickup_lat: SYDNEY.lat, pickup_lng: SYDNEY.lng, dropoff_label: 'B', dropoff_lat: SYDNEY.lat + 0.045, dropoff_lng: SYDNEY.lng, distance_m: 5000, duration_s: 600 })
+      as('rider-1', 'accept_quote', { quote_id: 'q1', ride_id: 'ride-q', client_record: '{}', pickup_lat: SYDNEY.lat, pickup_lng: SYDNEY.lng, dropoff_lat: SYDNEY.lat + 0.045, dropoff_lng: SYDNEY.lng, distance_m: 5000 })
+      as('rider-1', 'dispatch_tick', { request_id: 'ride-q' })
+      as('d1', 'accept_offer', { rider_id: 'rider-1', request_id: 'ride-q' })
+      complete('ride-q')
+      db.prepare('UPDATE fare_statements SET distance_cents = 9999').run()
+      expect(codes()).toContain('components_mismatch')
+    })
+
+    it('detects a cancellation fee that no longer matches the lifecycle', () => {
+      matched()
+      as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + 3 * MIN)
+      db.prepare('UPDATE trip_lifecycle SET cancel_fee_cents = 0').run()
+      expect(codes()).toEqual(['fee_not_lifecycle'])
+    })
+  })
+
+  describe('immutability and privacy', () => {
+    const tools = mcpFile.tools as unknown as { name: string; sql?: string; statements?: string[] }[]
+    const allSql = () => tools.flatMap((t) => (t.statements ?? [t.sql!]).map((sql) => ({ tool: t.name, sql })))
+
+    it('no action edits or deletes statements or adjustments, other than whole-account deletion', () => {
+      for (const { tool: name, sql } of allSql()) {
+        if (name === 'delete_my_rider_data') continue
+        expect(sql, name).not.toMatch(/UPDATE\s+fare_statements/i)
+        expect(sql, name).not.toMatch(/DELETE\s+FROM\s+fare_statements/i)
+        expect(sql, name).not.toMatch(/UPDATE\s+fare_adjustments/i)
+        expect(sql, name).not.toMatch(/DELETE\s+FROM\s+fare_adjustments/i)
+        if (/INSERT\s+(OR\s+IGNORE\s+)?INTO\s+fare_statements/i.test(sql)) expect(sql, name).toMatch(/INSERT OR IGNORE/)
+      }
+    })
+
+    it('statements can only be created by actions that end a trip', () => {
+      const writers = new Set(allSql().filter(({ sql }) => /INTO\s+fare_statements/i.test(sql)).map(({ tool: name }) => name))
+      expect([...writers].sort()).toEqual(['advance_trip', 'cancel_ride', 'driver_cancel_trip', 'ops_cancel_trip', 'report_driver_no_show', 'report_rider_no_show'])
+    })
+
+    it('account deletion removes the rider\'s ledger with the rest of their data', () => {
+      matched(); complete(); credit()
+      as('rider-1', 'delete_my_rider_data')
+      expect(count(db, 'fare_statements')).toBe(0)
+      expect(count(db, 'fare_adjustments')).toBe(0)
+    })
+
+    it('no action takes payment credentials or card data', () => {
+      const forbidden = /card|cvc|cvv|pan\b|iban|account_number|routing_number|secret|api_key|token/i
+      for (const t of mcpFile.tools as unknown as { name: string; params?: Record<string, unknown> }[])
+        for (const param of Object.keys(t.params ?? {})) expect(param, `${t.name}.${param}`).not.toMatch(forbidden)
+      const columns = (db.prepare("SELECT m.name AS tbl, p.name AS col FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type = 'table'").all() as { tbl: string; col: string }[])
+      for (const { tbl, col } of columns) expect(col, `${tbl}.${col}`).not.toMatch(/card|cvc|cvv|iban|account_number|routing_number|secret|api_key/i)
+    })
+  })
+})

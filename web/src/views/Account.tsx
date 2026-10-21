@@ -23,6 +23,8 @@ import {
   type SavedPlace,
   type TripBucket,
 } from '../lib/riderAccount'
+import { loadReceipts, type Receipt } from '../lib/receipts'
+import ReceiptCard from '../components/ReceiptCard'
 
 const card = 'rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4'
 const input = 'w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm text-[var(--ink)]'
@@ -52,6 +54,7 @@ export default function Account() {
       <TripHistory signedIn={signedIn} loading={auth.loading} />
       {signedIn && (
         <>
+          <Receipts />
           <ProfileForm />
           <SavedPlaces />
           <DataControls deleteAccount={auth.deleteAccount} />
@@ -252,6 +255,24 @@ function DataControls({ deleteAccount }: { deleteAccount: () => Promise<void> })
         <input className={`${input} mt-1`} value={confirm} onChange={(e) => setConfirm(e.target.value)} />
       </label>
       <button disabled={confirm !== 'DELETE' || busy} onClick={erase} className="mt-3 rounded-2xl bg-[var(--error)] px-5 py-2 text-sm font-semibold text-white disabled:opacity-50">Delete my account</button>
+    </section>
+  )
+}
+
+function Receipts() {
+  const [receipts, setReceipts] = useState<Receipt[] | null>(null)
+  useEffect(() => {
+    let live = true
+    loadReceipts().then((r) => live && setReceipts(r), () => live && setReceipts([]))
+    return () => {
+      live = false
+    }
+  }, [])
+  if (receipts === null || receipts.length === 0) return null
+  return (
+    <section aria-label="Receipts" className="space-y-3">
+      <h2 className={heading}>Receipts</h2>
+      {receipts.map((r) => <ReceiptCard key={r.receiptNo} receipt={r} />)}
     </section>
   )
 }

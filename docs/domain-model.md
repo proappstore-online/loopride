@@ -371,6 +371,21 @@ Positions are not map-matched. The data export (#3) does not yet include trip
 lifecycle, dispute or live-location data. Driver review-log rows are kept when a
 driver deletes their account, for audit.
 
+## Fare ledger and receipts (issue #9)
+
+Migration `0009_fare_ledger`: `fare_statements` (one immutable row per finished trip,
+written in the transaction that ends the trip) and `fare_adjustments` (append-only
+credits). Client: `lib/receipts.ts`, `components/ReceiptCard.tsx` (rider Trip and
+Account pages), driver earnings on `views/DriverTrip.tsx`. The decision record, with
+taxes, refunds, payouts, the PAS constraints and the test plan, is
+[`docs/adr/0001-fare-collection-payouts-receipts.md`](adr/0001-fare-collection-payouts-receipts.md).
+
+In short: a completed trip costs exactly its accepted quote; a cancelled one costs the
+recorded cancellation fee; corrections are ops credits that never exceed the amount;
+`ops_reconcile` proves every statement ties to its trip, quote and credits. **No payment
+is collected and no payout is made**, and no card or credential data exists anywhere in
+the app; collection is blocked on a PAS policy decision (ADR, "Needs an owner decision").
+
 ## Migrating legacy rides
 
 Existing rides live in localStorage (`loopride.rides.v2`, which already absorbs

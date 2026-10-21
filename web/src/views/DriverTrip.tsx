@@ -18,6 +18,7 @@ import {
   openDispute,
   reportRiderNoShow,
 } from '../lib/tripLifecycle'
+import { loadEarnings, money, type Earning } from '../lib/receipts'
 
 const TripMap = lazy(() => import('./TripMap'))
 
@@ -46,6 +47,7 @@ export default function DriverTrip({ riderId, rideId }: Props) {
   const [position, setPosition] = useState<LatLng | null>(null)
   const [geoError, setGeoError] = useState<string | null>(null)
   const [health, setHealth] = useState<PublishHealth>('waiting')
+  const [earning, setEarning] = useState<Earning | null>(null)
 
   const refresh = useCallback(() => loadDriverTrip(riderId, tripId).then(setTrip, () => setTrip((t) => t ?? null)), [riderId, tripId])
   useEffect(() => {
@@ -59,6 +61,15 @@ export default function DriverTrip({ riderId, rideId }: Props) {
   }, [refresh])
 
   const phase = trip?.phase ?? null
+  const finished = phase !== null && isFinished(phase)
+  useEffect(() => {
+    if (!finished) return
+    let live = true
+    loadEarnings().then((rows) => live && setEarning(rows.find((e) => e.tripId === tripId) ?? null), () => undefined)
+    return () => {
+      live = false
+    }
+  }, [finished, tripId])
   const driving = phase === 'en_route' || phase === 'arrived' || phase === 'in_progress'
   useWakeLock(driving)
 
@@ -152,6 +163,12 @@ export default function DriverTrip({ riderId, rideId }: Props) {
           {phase === 'completed' && 'Trip completed'}
           {phase === 'cancelled' && (trip.outcome ? OUTCOME_TEXT[trip.outcome].replace('You cancelled', 'The rider cancelled') : 'Trip cancelled')}
         </p>
+
+        {earning && (
+          <p role="status" aria-label="Earnings" className="mt-2 text-sm font-semibold text-[var(--ink)]">
+            {earning.payoutCents > 0 ? `Earned ${money(earning.payoutCents)} for this trip (accrued; payouts are not enabled yet)` : 'No earnings for this trip'}
+          </p>
+        )}
 
         <div className="mt-5 flex flex-wrap gap-2">
           {step && (

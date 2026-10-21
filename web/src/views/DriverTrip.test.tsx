@@ -18,6 +18,9 @@ vi.mock('../lib/tripLifecycle', async (importOriginal) => ({
   ...api,
 }))
 
+const { earnings } = vi.hoisted(() => ({ earnings: { rows: [] as Record<string, unknown>[] } }))
+vi.mock('../lib/receipts', async (importOriginal) => ({ ...(await importOriginal<typeof import('../lib/receipts')>()), loadEarnings: async () => earnings.rows }))
+
 import DriverTrip from './DriverTrip'
 import { renderWithRouter } from '../../test/router'
 
@@ -25,6 +28,7 @@ const trip = (extra: Record<string, unknown> = {}) => ({ tripId: 'r1:trip', requ
 const mount = () => render(renderWithRouter(<DriverTrip riderId="rider-1" rideId="r1" />, '/driver/trip/rider-1/r1').ui)
 
 beforeEach(() => {
+  earnings.rows = []
   current.trip = trip()
   Object.values(api).forEach((f) => f.mockClear())
   publishLocation.mockClear()
@@ -100,6 +104,29 @@ describe('DriverTrip', () => {
     current.trip = null
     mount()
     expect(await screen.findByText(/isn't assigned to you/)).toBeInTheDocument()
+  })
+
+  describe('earnings', () => {
+    it('shows the accrued payout for a completed trip, and says payouts are not enabled', async () => {
+      current.trip = trip({ phase: 'completed', outcome: 'completed' })
+      earnings.rows = [{ receiptNo: 'RCT-1', tripId: 'r1:trip', basis: 'fare', finalCents: 1500, taxCents: 0, platformFeeCents: 0, payoutCents: 1500, creditsCents: 0, finalizedAt: 1 }]
+      mount()
+      expect(await screen.findByRole('status', { name: 'Earnings' })).toHaveTextContent('Earned $15.00 for this trip (accrued; payouts are not enabled yet)')
+    })
+
+    it('says there are no earnings for a free cancellation', async () => {
+      current.trip = trip({ phase: 'cancelled', outcome: 'driver_cancelled' })
+      earnings.rows = [{ receiptNo: 'RCT-2', tripId: 'r1:trip', basis: 'none', finalCents: 0, taxCents: 0, platformFeeCents: 0, payoutCents: 0, creditsCents: 0, finalizedAt: 1 }]
+      mount()
+      expect(await screen.findByText('No earnings for this trip')).toBeInTheDocument()
+    })
+
+    it('shows nothing before the trip ends', async () => {
+      current.trip = trip({ phase: 'en_route' })
+      mount()
+      await screen.findByText('Driving to pickup')
+      expect(screen.queryByRole('status', { name: 'Earnings' })).not.toBeInTheDocument()
+    })
   })
 
   describe('location sharing', () => {

@@ -30,6 +30,9 @@ vi.mock('../lib/tracking', async (importOriginal) => ({
 }))
 vi.mock('../lib/routing', () => ({ fetchRoute: (...args: unknown[]) => route.fn(...args) }))
 
+const { receipts } = vi.hoisted(() => ({ receipts: { current: null as Record<string, unknown> | null, load: vi.fn() } }))
+vi.mock('../lib/receipts', async (importOriginal) => ({ ...(await importOriginal<typeof import('../lib/receipts')>()), loadReceipt: (...args: unknown[]) => receipts.load(...args) }))
+
 vi.mock('../lib/dispatch', () => ({
   runDispatch: vi.fn(async (_id: string, o: { onUpdate: (s: unknown) => void }) => {
     o.onUpdate(dispatchState.current)
@@ -60,6 +63,9 @@ const lifecycle = (extra: Record<string, unknown> = {}) => ({ tripId: 'ride-live
 const matchedDispatch = { state: 'matched', attempts: 1, offerStatus: 'accepted', driverName: 'Dana', plate: 'RS-9' }
 
 beforeEach(() => {
+  receipts.current = null
+  receipts.load.mockReset()
+  receipts.load.mockImplementation(async () => receipts.current)
   track.loc = null
   track.calls = 0
   route.fn.mockReset()
@@ -300,5 +306,33 @@ describe('Trip: server-driven rides', () => {
     tripState.current = lifecycle({ phase: 'en_route' })
     mount('ride-live')
     expect(await screen.findByText(/shared only while they are on the way or driving you, and is deleted when the trip ends/)).toBeInTheDocument()
+  })
+
+  const statement = (extra = {}) => ({ receiptNo: 'RCT-1', tripId: 'ride-live:trip', requestId: 'ride-live', basis: 'fare', currency: 'USD', quotedCents: 1711, baseCents: null, distanceCents: null, timeCents: null, bookingFeeCents: null, minAdjustCents: null, surgeMilli: null, finalCents: 1711, taxRateBp: 0, taxCents: 0, creditsCents: 0, totalCents: 1711, pickup: 'A', dropoff: 'B', finalizedAt: 1, ...extra })
+
+  it('shows the receipt once the trip is completed', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'completed' })
+    receipts.current = statement()
+    mount('ride-live')
+    expect(await screen.findByRole('region', { name: 'Receipt' })).toBeInTheDocument()
+    expect(receipts.load).toHaveBeenCalledWith('ride-live')
+  })
+
+  it('shows the cancellation fee receipt after a late cancellation', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'cancelled', outcome: 'rider_cancelled', cancelFeeCents: 500 })
+    receipts.current = statement({ basis: 'cancellation_fee', finalCents: 500, totalCents: 500 })
+    mount('ride-live')
+    expect(await screen.findByText('Cancellation fee', { selector: 'dt' })).toBeInTheDocument()
+  })
+
+  it('does not ask for a receipt while the trip is still open', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'en_route' })
+    mount('ride-live')
+    await screen.findByText('Dana is on the way')
+    expect(receipts.load).not.toHaveBeenCalled()
+    expect(screen.queryByRole('region', { name: 'Receipt' })).not.toBeInTheDocument()
   })
 })

@@ -31,6 +31,10 @@
     {
       "name": "0008_trip_locations",
       "sql": "CREATE TABLE IF NOT EXISTS trip_locations (rider_id TEXT NOT NULL, trip_id TEXT NOT NULL, driver_id TEXT NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, accuracy_m REAL, speed_mps REAL, updated_at INTEGER NOT NULL, PRIMARY KEY (rider_id, trip_id)); CREATE INDEX IF NOT EXISTS idx_trip_locations_updated ON trip_locations (updated_at)"
+    },
+    {
+      "name": "0009_fare_ledger",
+      "sql": "CREATE TABLE IF NOT EXISTS fare_statements (rider_id TEXT NOT NULL, trip_id TEXT NOT NULL, request_id TEXT NOT NULL, driver_user_id TEXT, receipt_no TEXT NOT NULL, basis TEXT NOT NULL CHECK (basis IN ('fare', 'cancellation_fee', 'no_show_fee', 'none')), currency TEXT NOT NULL, quote_id TEXT, quoted_cents INTEGER NOT NULL, base_cents INTEGER, distance_cents INTEGER, time_cents INTEGER, booking_fee_cents INTEGER, min_adjust_cents INTEGER, surge_milli INTEGER, final_cents INTEGER NOT NULL CHECK (final_cents >= 0), tax_rate_bp INTEGER NOT NULL, tax_cents INTEGER NOT NULL, commission_bp INTEGER NOT NULL, platform_fee_cents INTEGER NOT NULL, driver_payout_cents INTEGER NOT NULL, policy_version TEXT NOT NULL, outcome TEXT NOT NULL, pickup_label TEXT, dropoff_label TEXT, finalized_at INTEGER NOT NULL, PRIMARY KEY (rider_id, trip_id)); CREATE UNIQUE INDEX IF NOT EXISTS uq_fare_statements_receipt ON fare_statements (receipt_no); CREATE INDEX IF NOT EXISTS idx_fare_statements_driver ON fare_statements (driver_user_id, finalized_at); CREATE TABLE IF NOT EXISTS fare_adjustments (rider_id TEXT NOT NULL, id TEXT NOT NULL, trip_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('credit', 'refund')), amount_cents INTEGER NOT NULL CHECK (amount_cents > 0), reason_code TEXT NOT NULL, note TEXT, actor_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (rider_id, id)); CREATE INDEX IF NOT EXISTS idx_fare_adjustments_trip ON fare_adjustments (rider_id, trip_id, created_at)"
     }
   ]
 }

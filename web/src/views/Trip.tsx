@@ -22,6 +22,8 @@ import {
   type TripState,
 } from '../lib/tripLifecycle'
 import { showToast } from '../lib/toast'
+import { loadReceipt, type Receipt } from '../lib/receipts'
+import ReceiptCard from '../components/ReceiptCard'
 
 const TripMap = lazy(() => import('./TripMap'))
 
@@ -49,6 +51,7 @@ export default function Trip({ rideId }: TripProps) {
   const [trip, setTrip] = useState<TripState | null>(null)
   const [searchRun, setSearchRun] = useState(0)
   const [panel, setPanel] = useState<'cancel' | 'dispute' | null>(null)
+  const [receipt, setReceipt] = useState<Receipt | null>(null)
   const managed = Boolean(ride?.quoteId)
 
   useEffect(() => {
@@ -81,6 +84,16 @@ export default function Trip({ rideId }: TripProps) {
   }, [managed, rideId, searchRun, refreshTrip])
 
   const phase = trip?.phase ?? null
+  const finished = phase !== null && isFinished(phase)
+  // The statement is written in the transaction that ends the trip; read it once the trip is over.
+  useEffect(() => {
+    if (!managed || !finished) return
+    let live = true
+    loadReceipt(rideId).then((r) => live && setReceipt(r), () => undefined)
+    return () => {
+      live = false
+    }
+  }, [managed, finished, rideId, trip?.cancelFeeCents])
   const tracking = managed && (phase === 'en_route' || phase === 'arrived' || phase === 'in_progress')
 
   // Live location comes from authenticated server polling, so it works across devices.
@@ -254,6 +267,8 @@ export default function Trip({ rideId }: TripProps) {
           />
         )}
       </section>
+
+      {receipt && <div className="mt-4"><ReceiptCard receipt={receipt} /></div>}
 
       {managed && <p className="mt-6 text-center text-xs text-[var(--muted)]">Your driver's location is shared only while they are on the way or driving you, and is deleted when the trip ends.</p>}
     </div>
