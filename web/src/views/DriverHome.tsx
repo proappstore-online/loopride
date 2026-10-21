@@ -4,6 +4,7 @@ import AuthChip from '../components/AuthChip'
 import { useAuth } from '../lib/useAuth'
 import { useRideList } from '../lib/useRideList'
 import { app } from '../lib/app'
+import DriverOffers from '../components/DriverOffers'
 
 export default function DriverHome() {
   const auth = useAuth()
@@ -28,6 +29,8 @@ export default function DriverHome() {
         <p className="text-sm text-[var(--muted)]">Nearby trip requests and reservations.</p>
         <button onClick={() => setLocation('/driver/onboarding')} className="mt-3 rounded-full border border-[var(--line)] px-3 py-1 text-xs font-bold text-[var(--ink)] hover:bg-[var(--accent-soft)]">Driver application and vehicles</button>
       </header>
+
+      {auth.user && <DriverOffers />}
 
       {rides.length === 0 ? (
         <div className="rounded-3xl border border-[var(--line)] p-10 text-center text-sm text-[var(--muted)]">

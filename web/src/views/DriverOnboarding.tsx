@@ -4,6 +4,7 @@ import AuthChip from '../components/AuthChip'
 import { app } from '../lib/app'
 import { useAuth } from '../lib/useAuth'
 import { showToast } from '../lib/toast'
+import { SERVICE_RADIUS_OPTIONS_KM, currentPosition, loadLocation, publishLocation } from '../lib/dispatch'
 import {
   EMPTY_APPLICATION,
   deleteVehicle,
@@ -196,17 +197,45 @@ function Vehicles({ vehicles, editable, refresh }: { vehicles: DriverVehicle[]; 
   )
 }
 
+const LOCATION_REFRESH_MS = 60_000
+
 function Availability({ vehicles }: { vehicles: DriverVehicle[] }) {
   const approved = vehicles.filter((v) => v.status === 'approved')
   const [state, setState] = useState<{ available: boolean; vehicleId: string | null } | null>(null)
+  const [radiusKm, setRadiusKm] = useState<number>(5)
+
   useEffect(() => {
     loadAvailability().then(setState, () => undefined)
+    loadLocation().then((l) => l && setRadiusKm(l.radiusKm), () => undefined)
   }, [])
+
+  const publish = useCallback(async (): Promise<boolean> => {
+    const position = await currentPosition()
+    if (!position) return false
+    try {
+      await publishLocation(position.lat, position.lng, radiusKm)
+      return true
+    } catch {
+      return false
+    }
+  }, [radiusKm])
+
+  // Dispatch ignores stale locations, so keep publishing while online.
+  const online = state?.available === true
+  useEffect(() => {
+    if (!online) return
+    const timer = setInterval(() => void publish(), LOCATION_REFRESH_MS)
+    return () => clearInterval(timer)
+  }, [online, publish])
 
   const toggle = async () => {
     if (!state) return
     const vehicleId = state.vehicleId ?? approved[0]?.id ?? null
     try {
+      if (!state.available && !(await publish())) {
+        showToast({ message: 'Allow location access so nearby riders can be matched to you.' })
+        return
+      }
       await setAvailability(!state.available, vehicleId)
       const next = await loadAvailability()
       setState(next)
@@ -222,9 +251,16 @@ function Availability({ vehicles }: { vehicles: DriverVehicle[] }) {
       {approved.length === 0 ? (
         <p className="text-xs text-[var(--muted)]">You need an approved vehicle before you can go available.</p>
       ) : (
-        <button onClick={toggle} className="rounded-2xl bg-[var(--ink)] px-5 py-2 text-sm font-semibold text-white">
-          {state?.available ? 'Go offline' : 'Go available'}
-        </button>
+        <div className="space-y-3">
+          <label className="block text-xs font-bold text-[var(--ink)]">Service area
+            <select className={`${input} mt-1`} value={radiusKm} onChange={(e) => setRadiusKm(Number(e.target.value))}>
+              {SERVICE_RADIUS_OPTIONS_KM.map((km) => <option key={km} value={km}>Within {km} km of my location</option>)}
+            </select>
+          </label>
+          <button onClick={toggle} className="rounded-2xl bg-[var(--ink)] px-5 py-2 text-sm font-semibold text-white">
+            {state?.available ? 'Go offline' : 'Go available'}
+          </button>
+        </div>
       )}
     </section>
   )

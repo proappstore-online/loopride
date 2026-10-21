@@ -684,3 +684,366 @@ describe('driver onboarding, approval and dispatch eligibility', () => {
     expect(as('drv', 'list_my_driver_vehicles')).toMatchObject([{ plate: 'RS-482' }])
   })
 })
+
+describe('driver availability and dispatch matching', () => {
+  let db: Db
+  const NOW = Date.UTC(2026, 5, 1)
+  const SYDNEY = { lat: -33.8688, lng: 151.2093 }
+  // ~0.009 degrees of latitude is about 1 km.
+  const near = (km: number) => ({ lat: SYDNEY.lat + km * 0.009, lng: SYDNEY.lng })
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const as = (user: string, name: string, params: Record<string, unknown> = {}, now = NOW) => call(db, name, params, user, now)
+
+  const makeDriver = (
+    id: string,
+    opts: { at?: { lat: number; lng: number }; radius?: number; vehicleClass?: string; online?: boolean; locationAt?: number } = {},
+  ) => {
+    as(id, 'save_driver_application', { full_name: `Driver ${id}`, phone: '1', licence_number: `L-${id}`, licence_region: 'NSW', licence_expires: '2030-01-01', eligibility_confirmed: 1 })
+    as(id, 'save_driver_vehicle', { vehicle_id: `v-${id}`, plate: `P-${id}`, make: 'T', model: 'C', vehicle_class: opts.vehicleClass ?? 'share' })
+    as(id, 'submit_driver_application')
+    as('ops', 'review_driver_application', { driver_user_id: id, decision: 'approved' })
+    as(id, 'update_driver_location', { ...(opts.at ?? SYDNEY), service_radius_km: opts.radius ?? 10 }, opts.locationAt ?? NOW)
+    if (opts.online !== false) as(id, 'set_driver_availability', { available: 1, vehicle_id: `v-${id}` })
+  }
+
+  const ride = (id: string, extra: Partial<RecurringRide> = {}): RecurringRide => ({
+    id,
+    pickup: 'Central',
+    pickupCoord: SYDNEY,
+    dropoff: 'Airport',
+    dropoffCoord: null,
+    days: [],
+    time: '09:00',
+    driverName: '',
+    paused: false,
+    createdAt: 1,
+    bookingType: 'now',
+    vehicle: 'share',
+    fareCents: 1500,
+    ...extra,
+  })
+  const request = (rider: string, id = 'r1', extra: Partial<RecurringRide> = {}, now = NOW) => {
+    as(rider, 'save_ride', { ...rideToRecords(ride(id, extra)) }, now)
+    as(rider, 'request_dispatch', { request_id: id }, now)
+  }
+  const tick = (rider: string, id = 'r1', now = NOW) => as(rider, 'dispatch_tick', { request_id: id }, now)
+  const status = (rider: string, id = 'r1') => as(rider, 'get_dispatch_status', { request_id: id })[0] as Record<string, unknown> | undefined
+  const offers = (driver: string, now = NOW) => as(driver, 'list_my_offers', {}, now) as Record<string, unknown>[]
+  const offeredTo = (id = 'r1') => (db.prepare("SELECT driver_id FROM dispatch_offers WHERE request_id = ? AND status = 'offered'").get(id) as { driver_id: string } | undefined)?.driver_id
+  const offerStatuses = (id = 'r1') => (db.prepare('SELECT driver_id, status FROM dispatch_offers WHERE request_id = ? ORDER BY attempt').all(id) as { driver_id: string; status: string }[])
+  const accept = (driver: string, rider = 'rider-1', id = 'r1', now = NOW) => as(driver, 'accept_offer', { rider_id: rider, request_id: id }, now)
+
+  it('only dispatches open on-demand requests with pickup coordinates', () => {
+    as('rider-1', 'save_ride', { ...rideToRecords(ride('later', { bookingType: 'scheduled' })) })
+    as('rider-1', 'request_dispatch', { request_id: 'later' })
+    as('rider-1', 'save_ride', { ...rideToRecords(ride('nocoord', { pickupCoord: null })) })
+    as('rider-1', 'request_dispatch', { request_id: 'nocoord' })
+    as('rider-1', 'request_dispatch', { request_id: 'missing' })
+    expect(count(db, 'dispatch_requests')).toBe(0)
+    request('rider-1')
+    expect(status('rider-1')).toMatchObject({ status: 'searching', attempts: 0 })
+    expect(status('rider-2')).toBeUndefined() // other riders can't see it
+  })
+
+  it('offers the nearest eligible driver, breaking ties by driver id', () => {
+    makeDriver('far', { at: near(5) })
+    makeDriver('close', { at: near(1) })
+    request('rider-1')
+    tick('rider-1')
+    expect(offeredTo()).toBe('close')
+    expect(status('rider-1')).toMatchObject({ attempts: 1, offer_status: 'offered', driver_name: null, plate: null })
+
+    makeDriver('b-twin', { at: near(2) })
+    makeDriver('a-twin', { at: near(2) })
+    request('rider-2', 'r2')
+    tick('rider-2', 'r2')
+    expect(offeredTo('r2')).toBe('a-twin') // 'close' is locked, twins tie on distance
+  })
+
+  it('ignores drivers who are offline, out of radius, too far, or have a stale location', () => {
+    makeDriver('offline', { at: near(0.5), online: false })
+    makeDriver('narrow', { at: near(3), radius: 1 })
+    makeDriver('distant', { at: near(20), radius: 50 })
+    makeDriver('stale', { at: near(0.5), locationAt: NOW - 301_000 })
+    request('rider-1')
+    tick('rider-1')
+    expect(offeredTo()).toBeUndefined()
+    makeDriver('ok', { at: near(3), radius: 5 })
+    tick('rider-1')
+    expect(offeredTo()).toBe('ok')
+  })
+
+  it('matches vehicle tier: a bigger vehicle can serve a smaller tier, never the reverse', () => {
+    makeDriver('share-car', { at: near(0.5), vehicleClass: 'share' })
+    request('rider-1', 'r1', { vehicle: 'comfort' })
+    tick('rider-1')
+    expect(offeredTo()).toBeUndefined()
+    makeDriver('xl-van', { at: near(4), vehicleClass: 'xl' })
+    tick('rider-1')
+    expect(offeredTo()).toBe('xl-van')
+    request('rider-2', 'r2', { vehicle: 'share' })
+    makeDriver('xl-near', { at: near(0.1), vehicleClass: 'xl' })
+    tick('rider-2', 'r2')
+    expect(offeredTo('r2')).toBe('xl-near') // nearest eligible wins regardless of tier headroom
+  })
+
+  it('never offers to unapproved or suspended drivers', () => {
+    makeDriver('susp')
+    as('ops', 'review_driver_application', { driver_user_id: 'susp', decision: 'suspended', reason: 'complaint' })
+    as('applicant', 'save_driver_application', { full_name: 'X', eligibility_confirmed: 1 })
+    request('rider-1')
+    tick('rider-1')
+    expect(offeredTo()).toBeUndefined()
+  })
+
+  it('never matches a driver to their own ride', () => {
+    makeDriver('both')
+    request('both')
+    tick('both')
+    expect(offeredTo()).toBeUndefined()
+  })
+
+  it('locks a driver to one live offer: a second rider gets nobody, and the index backs it up', () => {
+    makeDriver('solo')
+    request('rider-1')
+    request('rider-2', 'r2')
+    tick('rider-1')
+    tick('rider-2', 'r2')
+    expect(offeredTo('r1')).toBe('solo')
+    expect(offeredTo('r2')).toBeUndefined()
+    expect(offers('solo')).toHaveLength(1)
+
+    const insert = (rider: string, req: string, attempt: number) =>
+      db.prepare("INSERT INTO dispatch_offers (rider_id, request_id, attempt, driver_id, status, offered_at, expires_at) VALUES (?, ?, ?, ?, 'offered', 1, 2)").run(rider, req, attempt, 'solo')
+    expect(() => insert('rider-2', 'r2', 1)).toThrow(/UNIQUE/) // same driver, second live offer
+    makeDriver('other')
+    expect(() =>
+      db.prepare("INSERT INTO dispatch_offers (rider_id, request_id, attempt, driver_id, status, offered_at, expires_at) VALUES ('rider-1', 'r1', 2, 'other', 'offered', 1, 2)").run(),
+    ).toThrow(/UNIQUE/) // same request, second live offer
+  })
+
+  it('repeated ticks do not stack offers', () => {
+    makeDriver('a')
+    makeDriver('b', { at: near(1) })
+    request('rider-1')
+    for (let i = 0; i < 4; i++) tick('rider-1')
+    expect(offerStatuses()).toHaveLength(1)
+  })
+
+  it('accept atomically assigns driver and rider, creates the trip, and links the driver', () => {
+    makeDriver('d1')
+    request('rider-1')
+    tick('rider-1')
+    expect(offers('d1')).toMatchObject([{ rider_id: 'rider-1', request_id: 'r1', status: 'offered', pickup_label: 'Central', dropoff_label: 'Airport', fare_cents: 1500 }])
+    accept('d1')
+
+    expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'matched' })
+    expect(db.prepare('SELECT status, driver_id, vehicle_id FROM assignments').get()).toEqual({ status: 'accepted', driver_id: 'drv_u_d1', vehicle_id: 'veh_v-d1' })
+    expect(db.prepare('SELECT display_name, user_id FROM drivers').get()).toEqual({ display_name: 'Driver d1', user_id: 'd1' })
+    expect(db.prepare('SELECT plate FROM vehicles').get()).toEqual({ plate: 'P-d1' })
+    expect(db.prepare('SELECT id, status, assignment_id FROM trips').get()).toEqual({ id: 'r1:trip', status: 'scheduled', assignment_id: 'r1:assignment' })
+    expect(db.prepare('SELECT to_status, actor_type, actor_id FROM trip_transitions').all()).toEqual([{ to_status: 'scheduled', actor_type: 'driver', actor_id: 'd1' }])
+    expect(status('rider-1')).toMatchObject({ status: 'matched', offer_status: 'accepted', driver_name: 'Driver d1', plate: 'P-d1' })
+
+    accept('d1') // replay changes nothing
+    expect(count(db, 'trips')).toBe(1)
+    expect(count(db, 'trip_transitions')).toBe(1)
+
+    // The link makes the trip drivable through the existing driver actions.
+    as('d1', 'advance_trip', { rider_id: 'rider-1', trip_id: 'r1:trip', to_status: 'en_route' })
+    expect(db.prepare('SELECT status FROM trips').get()).toEqual({ status: 'en_route' })
+  })
+
+  it('save_ride replays from the rider device do not undo a match', () => {
+    makeDriver('d1')
+    request('rider-1')
+    tick('rider-1')
+    accept('d1')
+    as('rider-1', 'save_ride', { ...rideToRecords(ride('r1')) }, NOW + 1)
+    expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'matched' })
+  })
+
+  it('the driver stays locked while the trip is active and is released when it finishes', () => {
+    makeDriver('d1')
+    request('rider-1')
+    request('rider-2', 'r2')
+    tick('rider-1')
+    accept('d1')
+    tick('rider-2', 'r2')
+    expect(offeredTo('r2')).toBeUndefined() // busy with an accepted assignment
+    for (const to of ['en_route', 'arrived']) as('d1', 'advance_trip', { rider_id: 'rider-1', trip_id: 'r1:trip', to_status: to })
+    tick('rider-2', 'r2')
+    expect(offeredTo('r2')).toBeUndefined()
+    as('d1', 'advance_trip', { rider_id: 'rider-1', trip_id: 'r1:trip', to_status: 'completed' })
+    expect(offerStatuses().map((o) => o.status)).toEqual(['completed'])
+    tick('rider-2', 'r2')
+    expect(offeredTo('r2')).toBe('d1')
+  })
+
+  it('only the offered driver can accept, and not after the offer expires', () => {
+    makeDriver('d1')
+    makeDriver('d2', { at: near(3) })
+    request('rider-1')
+    tick('rider-1')
+    accept('d2') // not their offer
+    expect(offerStatuses()).toEqual([{ driver_id: 'd1', status: 'offered' }])
+    accept('d1', 'someone-else') // wrong rider scope
+    expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'open' })
+    accept('d1', 'rider-1', 'r1', NOW + 30_000) // exactly at expiry
+    expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'open' })
+    expect(count(db, 'trips')).toBe(0)
+    expect(offers('d1', NOW + 30_000)).toEqual([]) // expired offers are hidden from the driver
+  })
+
+  it('cannot accept once the driver went offline or was suspended', () => {
+    makeDriver('d1')
+    request('rider-1')
+    tick('rider-1')
+    as('d1', 'set_driver_availability', { available: 0 })
+    expect(offerStatuses()).toEqual([{ driver_id: 'd1', status: 'cancelled' }])
+    accept('d1')
+    expect(count(db, 'assignments')).toBe(0)
+
+    makeDriver('d2', { at: near(1) })
+    tick('rider-1')
+    expect(offeredTo()).toBe('d2')
+    as('ops', 'review_driver_application', { driver_user_id: 'd2', decision: 'suspended', reason: 'safety' })
+    accept('d2')
+    expect(count(db, 'assignments')).toBe(0)
+    expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'open' })
+  })
+
+  it('decline re-dispatches to the next driver and never re-offers to the decliner', () => {
+    makeDriver('d1', { at: near(1) })
+    makeDriver('d2', { at: near(2) })
+    request('rider-1')
+    tick('rider-1')
+    as('d1', 'decline_offer', { rider_id: 'rider-1', request_id: 'r1' })
+    expect(offers('d1')).toEqual([])
+    tick('rider-1')
+    expect(offerStatuses()).toEqual([{ driver_id: 'd1', status: 'declined' }, { driver_id: 'd2', status: 'offered' }])
+    tick('rider-1')
+    expect(offerStatuses()).toHaveLength(2)
+  })
+
+  it('timeout expires the offer, frees the driver and re-dispatches', () => {
+    makeDriver('d1', { at: near(1) })
+    makeDriver('d2', { at: near(2) })
+    request('rider-1')
+    tick('rider-1')
+    tick('rider-1', 'r1', NOW + 29_999)
+    expect(offeredTo()).toBe('d1') // not yet expired
+    tick('rider-1', 'r1', NOW + 30_000)
+    expect(offerStatuses()).toEqual([{ driver_id: 'd1', status: 'expired' }, { driver_id: 'd2', status: 'offered' }])
+    accept('d1', 'rider-1', 'r1', NOW + 30_001)
+    expect(count(db, 'assignments')).toBe(0)
+  })
+
+  it("another rider's dispatch frees a silent driver whose offer expired", () => {
+    makeDriver('d1')
+    request('rider-1')
+    tick('rider-1')
+    const later = NOW + 40_000
+    request('rider-2', 'r2', {}, later)
+    as('rider-2', 'dispatch_tick', { request_id: 'r2' }, later)
+    expect(offerStatuses('r1')).toEqual([{ driver_id: 'd1', status: 'expired' }])
+    expect(offeredTo('r2')).toBe('d1')
+  })
+
+  it('gives up with no_driver after three offers, and the rider can restart', () => {
+    for (const [id, km] of [['d1', 1], ['d2', 2], ['d3', 3], ['d4', 4]] as const) makeDriver(id, { at: near(km) })
+    request('rider-1')
+    for (const id of ['d1', 'd2', 'd3']) {
+      tick('rider-1')
+      as(id, 'decline_offer', { rider_id: 'rider-1', request_id: 'r1' })
+    }
+    tick('rider-1')
+    expect(status('rider-1')).toMatchObject({ status: 'no_driver', attempts: 3 })
+    expect(offeredTo()).toBeUndefined() // d4 was never offered: the cap is 3
+    as('rider-1', 'request_dispatch', { request_id: 'r1' }, NOW + 1)
+    expect(status('rider-1')).toMatchObject({ status: 'searching', attempts: 0 })
+    tick('rider-1', 'r1', NOW + 1)
+    expect(offeredTo()).toBe('d1') // a new round may retry earlier decliners
+  })
+
+  it('reports no_driver when nobody is available inside the search window', () => {
+    request('rider-1')
+    tick('rider-1')
+    expect(status('rider-1')).toMatchObject({ status: 'searching' })
+    tick('rider-1', 'r1', NOW + 120_000)
+    expect(status('rider-1')).toMatchObject({ status: 'searching' }) // deadline inclusive
+    tick('rider-1', 'r1', NOW + 120_001)
+    expect(status('rider-1')).toMatchObject({ status: 'no_driver' })
+    makeDriver('late')
+    as('rider-1', 'request_dispatch', { request_id: 'r1' }, NOW + 121_000)
+    tick('rider-1', 'r1', NOW + 121_000)
+    expect(offeredTo()).toBe('late')
+  })
+
+  it('a driver arriving mid-search is picked up on the next tick', () => {
+    request('rider-1')
+    tick('rider-1')
+    makeDriver('late')
+    tick('rider-1', 'r1', NOW + 5_000)
+    expect(offeredTo()).toBe('late')
+  })
+
+  it('cancelling the ride withdraws the offer, frees the driver and blocks acceptance', () => {
+    makeDriver('d1')
+    request('rider-1')
+    tick('rider-1')
+    as('rider-1', 'cancel_ride', { request_id: 'r1' })
+    expect(offerStatuses()).toEqual([{ driver_id: 'd1', status: 'cancelled' }])
+    expect(status('rider-1')).toMatchObject({ status: 'cancelled' })
+    accept('d1')
+    expect(count(db, 'assignments')).toBe(0)
+    request('rider-2', 'r2')
+    tick('rider-2', 'r2')
+    expect(offeredTo('r2')).toBe('d1')
+  })
+
+  it('cancelling a matched ride releases the driver', () => {
+    makeDriver('d1')
+    request('rider-1')
+    tick('rider-1')
+    accept('d1')
+    as('rider-1', 'cancel_ride', { request_id: 'r1' })
+    expect(offerStatuses()).toEqual([{ driver_id: 'd1', status: 'cancelled' }])
+    expect(db.prepare('SELECT status FROM trips').get()).toEqual({ status: 'cancelled' })
+  })
+
+  it('a driver cancelling after accepting releases their lock', () => {
+    makeDriver('d1')
+    request('rider-1')
+    tick('rider-1')
+    accept('d1')
+    as('d1', 'advance_trip', { rider_id: 'rider-1', trip_id: 'r1:trip', to_status: 'cancelled', metadata: '{"reason":"flat tyre"}' })
+    expect(offerStatuses()).toEqual([{ driver_id: 'd1', status: 'cancelled' }])
+  })
+
+  it('location publishing is restricted to approved drivers and valid values', () => {
+    as('nobody', 'update_driver_location', { ...SYDNEY, service_radius_km: 5 })
+    makeDriver('d1')
+    as('d1', 'update_driver_location', { lat: 95, lng: 0, service_radius_km: 5 })
+    as('d1', 'update_driver_location', { ...SYDNEY, service_radius_km: 500 })
+    as('d1', 'update_driver_location', { ...SYDNEY, service_radius_km: 0.1 })
+    expect(as('nobody', 'get_my_driver_location')).toEqual([])
+    expect(as('d1', 'get_my_driver_location')).toMatchObject([{ lat: SYDNEY.lat, service_radius_km: 10 }])
+    as('d1', 'update_driver_location', { lat: -33.9, lng: 151.2, service_radius_km: 7 }, NOW + 9)
+    expect(as('d1', 'get_my_driver_location')).toMatchObject([{ lat: -33.9, service_radius_km: 7, updated_at: NOW + 9 }])
+  })
+
+  it('driver queries never reveal other drivers\' offers', () => {
+    makeDriver('d1')
+    makeDriver('d2', { at: near(5) })
+    request('rider-1')
+    tick('rider-1')
+    expect(offers('d2')).toEqual([])
+    expect(offers('rider-1')).toEqual([])
+  })
+})

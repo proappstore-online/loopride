@@ -8,7 +8,7 @@
         "INSERT OR IGNORE INTO riders (id, created_at, updated_at) VALUES (:__user_id, :__now, :__now)",
         "INSERT INTO drivers (rider_id, id, display_name, rating, status, created_at, updated_at) SELECT :__user_id, :driver_id, :driver_name, :driver_rating, 'active', :__now, :__now WHERE :driver_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET display_name = excluded.display_name, rating = COALESCE(excluded.rating, drivers.rating), updated_at = excluded.updated_at",
         "INSERT INTO vehicles (rider_id, id, driver_id, plate, vehicle_class, created_at, updated_at) SELECT :__user_id, :vehicle_id, :driver_id, :vehicle_plate, :vehicle_class, :__now, :__now WHERE :vehicle_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET driver_id = excluded.driver_id, vehicle_class = COALESCE(excluded.vehicle_class, vehicles.vehicle_class), updated_at = excluded.updated_at",
-        "INSERT INTO ride_requests (rider_id, id, booking_type, status, pickup_label, pickup_lat, pickup_lng, dropoff_label, dropoff_lat, dropoff_lng, recurring_days, pickup_time, scheduled_for, vehicle_class, requested_at, client_record, created_at, updated_at) VALUES (:__user_id, :request_id, :booking_type, :request_status, :pickup_label, :pickup_lat, :pickup_lng, :dropoff_label, :dropoff_lat, :dropoff_lng, :recurring_days, :pickup_time, :scheduled_for, :vehicle_class, :requested_at, :client_record, :created_at, :__now) ON CONFLICT (rider_id, id) DO UPDATE SET booking_type = excluded.booking_type, status = excluded.status, pickup_label = excluded.pickup_label, pickup_lat = excluded.pickup_lat, pickup_lng = excluded.pickup_lng, dropoff_label = excluded.dropoff_label, dropoff_lat = excluded.dropoff_lat, dropoff_lng = excluded.dropoff_lng, recurring_days = excluded.recurring_days, pickup_time = excluded.pickup_time, scheduled_for = excluded.scheduled_for, vehicle_class = excluded.vehicle_class, requested_at = excluded.requested_at, client_record = excluded.client_record, updated_at = excluded.updated_at",
+        "INSERT INTO ride_requests (rider_id, id, booking_type, status, pickup_label, pickup_lat, pickup_lng, dropoff_label, dropoff_lat, dropoff_lng, recurring_days, pickup_time, scheduled_for, vehicle_class, requested_at, client_record, created_at, updated_at) VALUES (:__user_id, :request_id, :booking_type, :request_status, :pickup_label, :pickup_lat, :pickup_lng, :dropoff_label, :dropoff_lat, :dropoff_lng, :recurring_days, :pickup_time, :scheduled_for, :vehicle_class, :requested_at, :client_record, :created_at, :__now) ON CONFLICT (rider_id, id) DO UPDATE SET booking_type = excluded.booking_type, status = CASE WHEN excluded.status = 'open' AND EXISTS (SELECT 1 FROM dispatch_requests d WHERE d.rider_id = ride_requests.rider_id AND d.request_id = ride_requests.id AND d.status = 'matched') THEN 'matched' ELSE excluded.status END, pickup_label = excluded.pickup_label, pickup_lat = excluded.pickup_lat, pickup_lng = excluded.pickup_lng, dropoff_label = excluded.dropoff_label, dropoff_lat = excluded.dropoff_lat, dropoff_lng = excluded.dropoff_lng, recurring_days = excluded.recurring_days, pickup_time = excluded.pickup_time, scheduled_for = excluded.scheduled_for, vehicle_class = excluded.vehicle_class, requested_at = excluded.requested_at, client_record = excluded.client_record, updated_at = excluded.updated_at",
         "INSERT INTO quotes (rider_id, id, request_id, vehicle_class, fare_cents, eta_minutes, status, created_at, updated_at) SELECT :__user_id, :quote_id, :request_id, :vehicle_class, :fare_cents, :eta_minutes, 'accepted', :__now, :__now WHERE :quote_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET vehicle_class = excluded.vehicle_class, fare_cents = excluded.fare_cents, eta_minutes = excluded.eta_minutes, updated_at = excluded.updated_at",
         "INSERT INTO assignments (rider_id, id, request_id, driver_id, vehicle_id, status, created_at, updated_at) SELECT :__user_id, :assignment_id, :request_id, :driver_id, :vehicle_id, 'accepted', :__now, :__now WHERE :assignment_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET driver_id = excluded.driver_id, vehicle_id = excluded.vehicle_id, updated_at = excluded.updated_at",
         "INSERT OR IGNORE INTO trip_transitions (rider_id, id, trip_id, from_status, to_status, actor_type, actor_id, metadata, at) SELECT :__user_id, :trip_event_id, :trip_id, CASE WHEN c.cur = :trip_status THEN NULL ELSE c.cur END, :trip_status, 'rider', :__user_id, '{\"source\":\"save_ride\"}', :__now FROM (SELECT (SELECT t.status FROM trips t WHERE t.rider_id = :__user_id AND t.id = :trip_id) AS cur) c WHERE :trip_event_id IS NOT NULL AND (c.cur IS NULL OR c.cur = :trip_status OR (c.cur IN ('scheduled', 'en_route', 'arrived') AND CASE :trip_status WHEN 'scheduled' THEN 0 WHEN 'en_route' THEN 1 WHEN 'arrived' THEN 2 WHEN 'completed' THEN 3 END > CASE c.cur WHEN 'scheduled' THEN 0 WHEN 'en_route' THEN 1 WHEN 'arrived' THEN 2 WHEN 'completed' THEN 3 END))",
@@ -126,9 +126,11 @@
     },
     {
       "name": "cancel_ride",
-      "description": "Cancel one of the caller's ride requests and any unfinished trip for it",
+      "description": "Cancel one of the caller's ride requests and any unfinished trip for it Also withdraws any dispatch offer.",
       "operation": "batch",
       "statements": [
+        "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE rider_id = :__user_id AND request_id = :request_id AND status IN ('offered', 'accepted')",
+        "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE rider_id = :__user_id AND request_id = :request_id AND status IN ('searching', 'matched')",
         "INSERT OR IGNORE INTO trip_transitions (rider_id, id, trip_id, from_status, to_status, actor_type, actor_id, metadata, at) SELECT :__user_id, t.id || ':' || 'cancelled', t.id, t.status, 'cancelled', 'rider', :__user_id, '{\"source\":\"cancel_ride\"}', :__now FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status NOT IN ('completed', 'cancelled')",
         "INSERT OR IGNORE INTO trip_events (rider_id, id, trip_id, type, status, at) SELECT :__user_id, t.id || ':' || 'cancelled', t.id, 'status', 'cancelled', :__now FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status NOT IN ('completed', 'cancelled')",
         "UPDATE ride_requests SET status = 'cancelled', updated_at = :__now WHERE rider_id = :__user_id AND id = :request_id",
@@ -158,13 +160,14 @@
     },
     {
       "name": "advance_trip",
-      "description": "Driver action: move a trip assigned to the caller's driver account one step (scheduled -> en_route -> arrived -> completed) or cancel it. Invalid transitions, unassigned trips and other drivers' trips change nothing. Records actor, time and optional metadata in trip_transitions.",
+      "description": "Driver action: move a trip assigned to the caller's driver account one step (scheduled -> en_route -> arrived -> completed) or cancel it. Invalid transitions, unassigned trips and other drivers' trips change nothing. Records actor, time and optional metadata in trip_transitions. Completing or cancelling also releases the driver's dispatch lock.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_transitions (rider_id, id, trip_id, from_status, to_status, actor_type, actor_id, metadata, at) SELECT t.rider_id, t.id || ':' || :to_status, t.id, t.status, :to_status, 'driver', :__user_id, :metadata, :__now FROM trips t JOIN assignments a ON a.rider_id = t.rider_id AND a.id = t.assignment_id JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND d.user_id = :__user_id AND ((t.status = 'scheduled' AND :to_status IN ('en_route', 'cancelled')) OR (t.status = 'en_route' AND :to_status IN ('arrived', 'cancelled')) OR (t.status = 'arrived' AND :to_status IN ('completed', 'cancelled')))",
         "INSERT OR IGNORE INTO trip_events (rider_id, id, trip_id, type, status, at) SELECT x.rider_id, x.trip_id || ':' || x.to_status, x.trip_id, 'status', x.to_status, x.at FROM trip_transitions x WHERE x.rider_id = :rider_id AND x.trip_id = :trip_id AND x.to_status = :to_status AND x.actor_id = :__user_id",
         "UPDATE trips SET status = :to_status, updated_at = :__now WHERE rider_id = :rider_id AND id = :trip_id AND ((trips.status = 'scheduled' AND :to_status IN ('en_route', 'cancelled')) OR (trips.status = 'en_route' AND :to_status IN ('arrived', 'cancelled')) OR (trips.status = 'arrived' AND :to_status IN ('completed', 'cancelled'))) AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = trips.rider_id AND a.id = trips.assignment_id AND d.user_id = :__user_id)",
-        "UPDATE ride_requests SET status = CASE WHEN :to_status = 'completed' THEN 'completed' ELSE 'cancelled' END, updated_at = :__now WHERE rider_id = :rider_id AND :to_status IN ('completed', 'cancelled') AND id = (SELECT t.request_id FROM trips t JOIN assignments a ON a.rider_id = t.rider_id AND a.id = t.assignment_id JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND d.user_id = :__user_id AND t.status = :to_status)"
+        "UPDATE ride_requests SET status = CASE WHEN :to_status = 'completed' THEN 'completed' ELSE 'cancelled' END, updated_at = :__now WHERE rider_id = :rider_id AND :to_status IN ('completed', 'cancelled') AND id = (SELECT t.request_id FROM trips t JOIN assignments a ON a.rider_id = t.rider_id AND a.id = t.assignment_id JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND d.user_id = :__user_id AND t.status = :to_status)",
+        "UPDATE dispatch_offers SET status = :to_status, responded_at = :__now WHERE driver_id = :__user_id AND rider_id = :rider_id AND status = 'accepted' AND :to_status IN ('completed', 'cancelled') AND request_id = (SELECT t.request_id FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.status = :to_status)"
       ],
       "params": {
         "rider_id": {
@@ -541,9 +544,8 @@
     },
     {
       "name": "set_driver_availability",
-      "description": "Go on or off dispatch. Going available only works for an approved (not suspended) driver with an unexpired licence and an approved vehicle; otherwise nothing changes. Going unavailable always works.",
-      "operation": "execute",
-      "sql": "INSERT INTO driver_availability (user_id, available, vehicle_id, updated_at) SELECT :__user_id, :available, :vehicle_id, :__now WHERE :available = 0 OR EXISTS (SELECT 1 FROM driver_applications a JOIN driver_vehicles v ON v.user_id = a.user_id WHERE a.user_id = :__user_id AND a.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND v.id = :vehicle_id AND v.status = 'approved') ON CONFLICT (user_id) DO UPDATE SET available = excluded.available, vehicle_id = COALESCE(excluded.vehicle_id, driver_availability.vehicle_id), updated_at = excluded.updated_at",
+      "description": "Go on or off dispatch. Going available only works for an approved (not suspended) driver with an unexpired licence and an approved vehicle; otherwise nothing changes. Going unavailable always works. Going offline also withdraws any open offer to the driver.",
+      "operation": "batch",
       "params": {
         "available": {
           "type": "integer"
@@ -553,7 +555,11 @@
           "optional": true
         }
       },
-      "requires_auth": true
+      "requires_auth": true,
+      "statements": [
+        "INSERT INTO driver_availability (user_id, available, vehicle_id, updated_at) SELECT :__user_id, :available, :vehicle_id, :__now WHERE :available = 0 OR EXISTS (SELECT 1 FROM driver_applications a JOIN driver_vehicles v ON v.user_id = a.user_id WHERE a.user_id = :__user_id AND a.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND v.id = :vehicle_id AND v.status = 'approved') ON CONFLICT (user_id) DO UPDATE SET available = excluded.available, vehicle_id = COALESCE(excluded.vehicle_id, driver_availability.vehicle_id), updated_at = excluded.updated_at",
+        "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE driver_id = :__user_id AND status = 'offered' AND :available = 0"
+      ]
     },
     {
       "name": "list_driver_applications",
@@ -716,6 +722,119 @@
           "ops"
         ]
       }
+    },
+    {
+      "name": "update_driver_location",
+      "description": "Driver: publish the caller's current position and the radius (0.5-50 km) they will serve around it. Only approved drivers; out-of-range values change nothing. Dispatch ignores locations older than 5 minutes, so keep publishing while online.",
+      "operation": "execute",
+      "sql": "INSERT INTO driver_locations (user_id, lat, lng, service_radius_km, updated_at) SELECT :__user_id, :lat, :lng, :service_radius_km, :__now WHERE :lat BETWEEN -90 AND 90 AND :lng BETWEEN -180 AND 180 AND :service_radius_km BETWEEN 0.5 AND 50 AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :__user_id AND a.status = 'approved') ON CONFLICT (user_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, service_radius_km = excluded.service_radius_km, updated_at = excluded.updated_at",
+      "params": {
+        "lat": {
+          "type": "number"
+        },
+        "lng": {
+          "type": "number"
+        },
+        "service_radius_km": {
+          "type": "number"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "get_my_driver_location",
+      "description": "The caller's last published position and service radius",
+      "operation": "query",
+      "sql": "SELECT lat, lng, service_radius_km, updated_at FROM driver_locations WHERE user_id = :__user_id",
+      "requires_auth": true
+    },
+    {
+      "name": "list_my_offers",
+      "description": "Driver: the caller's live dispatch offer (unexpired) or accepted assignment, with pickup, drop-off and fare",
+      "operation": "query",
+      "sql": "SELECT o.rider_id, o.request_id, o.status, o.distance_km2, o.offered_at, o.expires_at, r.pickup_label, r.pickup_lat, r.pickup_lng, r.dropoff_label, r.vehicle_class, q.fare_cents FROM dispatch_offers o JOIN ride_requests r ON r.rider_id = o.rider_id AND r.id = o.request_id LEFT JOIN quotes q ON q.rider_id = o.rider_id AND q.request_id = o.request_id WHERE o.driver_id = :__user_id AND (o.status = 'accepted' OR (o.status = 'offered' AND o.expires_at > :__now)) ORDER BY o.offered_at",
+      "requires_auth": true
+    },
+    {
+      "name": "accept_offer",
+      "description": "Driver: accept the caller's live offer. Atomic: succeeds only while the offer is unexpired, the request is still searching and the driver is still eligible and available. On success the rider gets an assignment and a scheduled trip, the request becomes matched, and the driver is linked to the trip so advance_trip works. Otherwise nothing changes.",
+      "operation": "batch",
+      "statements": [
+        "UPDATE dispatch_offers SET status = 'accepted', responded_at = :__now WHERE driver_id = :__user_id AND rider_id = :rider_id AND request_id = :request_id AND status = 'offered' AND expires_at > :__now AND EXISTS (SELECT 1 FROM driver_availability da JOIN driver_applications a ON a.user_id = da.user_id JOIN driver_vehicles v ON v.user_id = da.user_id AND v.id = dispatch_offers.vehicle_id WHERE da.user_id = :__user_id AND da.available = 1 AND a.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND v.status = 'approved') AND EXISTS (SELECT 1 FROM dispatch_requests dr WHERE dr.rider_id = :rider_id AND dr.request_id = :request_id AND dr.status = 'searching') AND EXISTS (SELECT 1 FROM ride_requests r WHERE r.rider_id = :rider_id AND r.id = :request_id AND r.status = 'open')",
+        "INSERT INTO drivers (rider_id, id, display_name, user_id, status, created_at, updated_at) SELECT :rider_id, 'drv_u_' || :__user_id, a.full_name, :__user_id, 'active', :__now, :__now FROM driver_applications a WHERE a.user_id = :__user_id AND EXISTS (SELECT 1 FROM dispatch_offers o WHERE o.driver_id = :__user_id AND o.rider_id = :rider_id AND o.request_id = :request_id AND o.status = 'accepted') ON CONFLICT (rider_id, id) DO UPDATE SET display_name = excluded.display_name, user_id = excluded.user_id, updated_at = excluded.updated_at",
+        "INSERT INTO vehicles (rider_id, id, driver_id, plate, vehicle_class, created_at, updated_at) SELECT :rider_id, 'veh_' || v.id, 'drv_u_' || :__user_id, v.plate, v.vehicle_class, :__now, :__now FROM dispatch_offers o JOIN driver_vehicles v ON v.user_id = o.driver_id AND v.id = o.vehicle_id WHERE o.driver_id = :__user_id AND o.rider_id = :rider_id AND o.request_id = :request_id AND o.status = 'accepted' ON CONFLICT (rider_id, id) DO UPDATE SET driver_id = excluded.driver_id, plate = excluded.plate, vehicle_class = excluded.vehicle_class, updated_at = excluded.updated_at",
+        "INSERT INTO assignments (rider_id, id, request_id, driver_id, vehicle_id, status, created_at, updated_at) SELECT :rider_id, :request_id || ':' || 'assignment', :request_id, 'drv_u_' || :__user_id, 'veh_' || o.vehicle_id, 'accepted', :__now, :__now FROM dispatch_offers o WHERE o.driver_id = :__user_id AND o.rider_id = :rider_id AND o.request_id = :request_id AND o.status = 'accepted' ON CONFLICT (rider_id, id) DO UPDATE SET driver_id = excluded.driver_id, vehicle_id = excluded.vehicle_id, status = 'accepted', updated_at = excluded.updated_at",
+        "INSERT INTO trips (rider_id, id, request_id, assignment_id, status, created_at, updated_at) SELECT :rider_id, :request_id || ':' || 'trip', :request_id, :request_id || ':' || 'assignment', 'scheduled', :__now, :__now FROM dispatch_offers o WHERE o.driver_id = :__user_id AND o.rider_id = :rider_id AND o.request_id = :request_id AND o.status = 'accepted' ON CONFLICT (rider_id, id) DO UPDATE SET assignment_id = excluded.assignment_id, updated_at = excluded.updated_at",
+        "INSERT OR IGNORE INTO trip_transitions (rider_id, id, trip_id, from_status, to_status, actor_type, actor_id, metadata, at) SELECT :rider_id, :request_id || ':' || 'trip' || ':' || 'scheduled', :request_id || ':' || 'trip', NULL, 'scheduled', 'driver', :__user_id, '{\"source\":\"dispatch\"}', :__now FROM dispatch_offers o WHERE o.driver_id = :__user_id AND o.rider_id = :rider_id AND o.request_id = :request_id AND o.status = 'accepted'",
+        "INSERT OR IGNORE INTO trip_events (rider_id, id, trip_id, type, status, at) SELECT :rider_id, :request_id || ':' || 'trip' || ':' || 'scheduled', :request_id || ':' || 'trip', 'status', 'scheduled', :__now FROM dispatch_offers o WHERE o.driver_id = :__user_id AND o.rider_id = :rider_id AND o.request_id = :request_id AND o.status = 'accepted'",
+        "UPDATE ride_requests SET status = 'matched', updated_at = :__now WHERE rider_id = :rider_id AND id = :request_id AND status = 'open' AND EXISTS (SELECT 1 FROM dispatch_offers o WHERE o.driver_id = :__user_id AND o.rider_id = :rider_id AND o.request_id = :request_id AND o.status = 'accepted')",
+        "UPDATE dispatch_requests SET status = 'matched', updated_at = :__now WHERE rider_id = :rider_id AND request_id = :request_id AND status = 'searching' AND EXISTS (SELECT 1 FROM dispatch_offers o WHERE o.driver_id = :__user_id AND o.rider_id = :rider_id AND o.request_id = :request_id AND o.status = 'accepted')"
+      ],
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "decline_offer",
+      "description": "Driver: decline the caller's live offer. The rider's next dispatch_tick offers the request to the next driver.",
+      "operation": "execute",
+      "sql": "UPDATE dispatch_offers SET status = 'declined', responded_at = :__now WHERE driver_id = :__user_id AND rider_id = :rider_id AND request_id = :request_id AND status = 'offered'",
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "request_dispatch",
+      "description": "Rider: start (or restart, after no_driver or cancel) driver search for one of the caller's open on-demand requests that has pickup coordinates. Save the ride first. Searching lasts 2 minutes and offers go to at most 3 drivers.",
+      "operation": "execute",
+      "sql": "INSERT INTO dispatch_requests (rider_id, request_id, status, pickup_lat, pickup_lng, vehicle_class, attempts, started_at, deadline_at, updated_at) SELECT :__user_id, r.id, 'searching', r.pickup_lat, r.pickup_lng, r.vehicle_class, 0, :__now, :__now + 120000, :__now FROM ride_requests r WHERE r.rider_id = :__user_id AND r.id = :request_id AND r.booking_type = 'now' AND r.status = 'open' AND r.pickup_lat IS NOT NULL AND r.pickup_lng IS NOT NULL ON CONFLICT (rider_id, request_id) DO UPDATE SET status = 'searching', pickup_lat = excluded.pickup_lat, pickup_lng = excluded.pickup_lng, vehicle_class = excluded.vehicle_class, attempts = 0, started_at = excluded.started_at, deadline_at = excluded.deadline_at, updated_at = excluded.updated_at WHERE dispatch_requests.status IN ('no_driver', 'cancelled')",
+      "params": {
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "dispatch_tick",
+      "description": "Rider: advance dispatch for one request. Expires stale offers (sweeping all expired offers so a silent driver is never locked), offers the request to the best eligible driver if none is live, then marks the search no_driver once 3 offers are spent or the 2 minute window passes. Idempotent: call it every few seconds until get_dispatch_status is matched, no_driver or cancelled.",
+      "operation": "batch",
+      "statements": [
+        "UPDATE dispatch_offers SET status = 'expired', responded_at = :__now WHERE status = 'offered' AND expires_at <= :__now AND :__user_id IS NOT NULL",
+        "INSERT OR IGNORE INTO dispatch_offers (rider_id, request_id, attempt, driver_id, vehicle_id, status, distance_km2, offered_at, expires_at) SELECT dr.rider_id, dr.request_id, (SELECT COUNT(*) + 1 FROM dispatch_offers x WHERE x.rider_id = dr.rider_id AND x.request_id = dr.request_id), da.user_id, da.vehicle_id, 'offered', (((l.lat - dr.pickup_lat) * (l.lat - dr.pickup_lat) + (l.lng - dr.pickup_lng) * (l.lng - dr.pickup_lng) * (1 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 2 + ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 24 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 720) * (1 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 2 + ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 24 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 720)) * 12364.5), :__now, :__now + 30000 FROM dispatch_requests dr JOIN driver_availability da ON da.available = 1 JOIN driver_applications a ON a.user_id = da.user_id JOIN driver_vehicles v ON v.user_id = da.user_id AND v.id = da.vehicle_id JOIN driver_locations l ON l.user_id = da.user_id WHERE dr.rider_id = :__user_id AND dr.request_id = :request_id AND dr.status = 'searching' AND :__now <= dr.deadline_at AND (SELECT COUNT(*) FROM dispatch_offers x WHERE x.rider_id = dr.rider_id AND x.request_id = dr.request_id AND x.offered_at >= dr.started_at) < 3 AND NOT EXISTS (SELECT 1 FROM dispatch_offers o WHERE o.rider_id = dr.rider_id AND o.request_id = dr.request_id AND o.status IN ('offered', 'accepted')) AND a.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND v.status = 'approved' AND (CASE coalesce(v.vehicle_class, 'share') WHEN 'share' THEN 0 WHEN 'comfort' THEN 1 WHEN 'xl' THEN 2 END) >= (CASE coalesce(dr.vehicle_class, 'share') WHEN 'share' THEN 0 WHEN 'comfort' THEN 1 WHEN 'xl' THEN 2 END) AND l.updated_at >= :__now - 300000 AND da.user_id != dr.rider_id AND (((l.lat - dr.pickup_lat) * (l.lat - dr.pickup_lat) + (l.lng - dr.pickup_lng) * (l.lng - dr.pickup_lng) * (1 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 2 + ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 24 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 720) * (1 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 2 + ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 24 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 720)) * 12364.5) <= 225 AND (((l.lat - dr.pickup_lat) * (l.lat - dr.pickup_lat) + (l.lng - dr.pickup_lng) * (l.lng - dr.pickup_lng) * (1 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 2 + ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 24 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 720) * (1 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 2 + ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 24 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 720)) * 12364.5) <= l.service_radius_km * l.service_radius_km AND NOT EXISTS (SELECT 1 FROM dispatch_offers o WHERE o.driver_id = da.user_id AND o.status IN ('offered', 'accepted')) AND NOT EXISTS (SELECT 1 FROM dispatch_offers p WHERE p.rider_id = dr.rider_id AND p.request_id = dr.request_id AND p.driver_id = da.user_id AND p.offered_at >= dr.started_at) ORDER BY (((l.lat - dr.pickup_lat) * (l.lat - dr.pickup_lat) + (l.lng - dr.pickup_lng) * (l.lng - dr.pickup_lng) * (1 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 2 + ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 24 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 720) * (1 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 2 + ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 24 - ((dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295) * (dr.pickup_lat * 0.017453292519943295)) / 720)) * 12364.5), da.user_id LIMIT 1",
+        "UPDATE dispatch_requests SET attempts = (SELECT COUNT(*) FROM dispatch_offers x WHERE x.rider_id = dispatch_requests.rider_id AND x.request_id = dispatch_requests.request_id AND x.offered_at >= dispatch_requests.started_at), updated_at = :__now WHERE rider_id = :__user_id AND request_id = :request_id AND status = 'searching'",
+        "UPDATE dispatch_requests SET status = 'no_driver', updated_at = :__now WHERE rider_id = :__user_id AND request_id = :request_id AND status = 'searching' AND (attempts >= 3 OR :__now > deadline_at) AND NOT EXISTS (SELECT 1 FROM dispatch_offers o WHERE o.rider_id = dispatch_requests.rider_id AND o.request_id = dispatch_requests.request_id AND o.status IN ('offered', 'accepted'))"
+      ],
+      "params": {
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "get_dispatch_status",
+      "description": "Rider: where dispatch stands for one of the caller's requests: searching, matched, no_driver or cancelled, offers made so far, and the live offer. The driver's name and plate are revealed only once they have accepted.",
+      "operation": "query",
+      "sql": "SELECT dr.status, dr.attempts, dr.deadline_at, o.status AS offer_status, o.expires_at AS offer_expires_at, o.distance_km2, CASE WHEN o.status = 'accepted' THEN a.full_name END AS driver_name, CASE WHEN o.status = 'accepted' THEN v.plate END AS plate FROM dispatch_requests dr LEFT JOIN dispatch_offers o ON o.rider_id = dr.rider_id AND o.request_id = dr.request_id AND o.status IN ('offered', 'accepted') LEFT JOIN driver_applications a ON a.user_id = o.driver_id LEFT JOIN driver_vehicles v ON v.user_id = o.driver_id AND v.id = o.vehicle_id WHERE dr.rider_id = :__user_id AND dr.request_id = :request_id",
+      "params": {
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
     }
   ]
 }

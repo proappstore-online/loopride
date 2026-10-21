@@ -158,6 +158,56 @@ a driver immediately even if their stored flag is stale. Suspension also clears
 the flag, and reinstated drivers must opt in again. Nothing consumes
 `list_dispatchable_drivers` yet; matching riders to drivers is a separate piece.
 
+## Driver availability and dispatch (issue #5)
+
+Migration `0005_dispatch`: `driver_locations`, `dispatch_requests`,
+`dispatch_offers`. Client: `web/src/lib/dispatch.ts`,
+`components/DriverOffers.tsx` (Driver home), and the Availability panel on
+`/driver/onboarding`.
+
+**Drivers** go online/offline with `set_driver_availability` (see #4) and publish a
+position plus a service radius (0.5-50 km) with `update_driver_location`; the UI
+offers 2/5/10/25 km, asks for browser location when going online, and
+republishes every minute. Only approved drivers can publish. Going offline
+withdraws any open offer.
+
+**Rider flow.** Save the ride (it needs pickup coordinates, `booking_type = now`,
+status `open`), call `request_dispatch`, then call `dispatch_tick` every few
+seconds while `get_dispatch_status` is `searching` (`runDispatch` does this).
+Nothing runs in the background: the rider's ticks drive timeouts and
+re-dispatch, and every tick also expires *all* overdue offers so a silent
+driver is never stuck.
+
+**Matching** (inside `dispatch_tick`, one deterministic SQL statement). A driver
+qualifies if they are online, approved, with an approved vehicle and unexpired
+licence, published a location in the last 5 minutes, are within both their own
+service radius and 15 km of the pickup, have a vehicle at or above the requested
+tier (`share` < `comfort` < `xl`), hold no live offer or assignment, are not the
+rider, and have not already been offered this request in this round. The
+nearest qualifying driver wins; ties go to the lowest driver id. Distances are
+squared km computed in SQL with a cosine series (no `sqrt`/`cos` needed).
+
+**Locks and atomicity.** Two partial unique indexes allow at most one live
+(`offered`/`accepted`) offer per driver and per request, so even concurrent
+ticks cannot double-book either side; the losing insert is ignored. `accept_offer`
+is one transaction guarded by "offer still `offered` and unexpired, driver still
+online/approved, request still searching and open"; only then does it create the
+rider-side driver, vehicle, assignment and `scheduled` trip (with a transition
+row), set the request `matched`, and link `drivers.user_id`, which is what lets
+`advance_trip` work. The driver's lock is released when the trip is completed or
+cancelled by either side.
+
+**Timeout, decline, no-driver, re-dispatch.** An offer lasts 30 s. Decline or
+timeout frees the driver and the next tick offers to the next-nearest driver.
+After 3 offers in a round, or 2 minutes, the search becomes `no_driver`; the
+rider may call `request_dispatch` again for a fresh round. Cancelling the ride
+withdraws offers at any stage.
+
+**Not done.** The rider-facing screens (New ride / Trip) still show the
+simulated driver; wiring them to `runDispatch` is a follow-up. Offers reach
+drivers by polling (every 5 s), not push. Driver location is not streamed to
+the rider through these tables.
+
 ## Migrating legacy rides
 
 Existing rides live in localStorage (`loopride.rides.v2`, which already absorbs
