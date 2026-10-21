@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "save_ride",
-      "description": "Upsert one of the caller's rides as domain records (ride request plus its driver, vehicle, quote, assignment, trip and trip status event). Idempotent: ids are derived from the client ride, so replaying the same ride changes nothing.",
+      "description": "Upsert one of the caller's rides as domain records (ride request plus its driver, vehicle, quote, assignment, trip, trip status event and transition history; trip status only moves forward). Idempotent: ids are derived from the client ride, so replaying the same ride changes nothing.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO riders (id, created_at, updated_at) VALUES (:__user_id, :__now, :__now)",
@@ -11,8 +11,9 @@
         "INSERT INTO ride_requests (rider_id, id, booking_type, status, pickup_label, pickup_lat, pickup_lng, dropoff_label, dropoff_lat, dropoff_lng, recurring_days, pickup_time, scheduled_for, vehicle_class, requested_at, client_record, created_at, updated_at) VALUES (:__user_id, :request_id, :booking_type, :request_status, :pickup_label, :pickup_lat, :pickup_lng, :dropoff_label, :dropoff_lat, :dropoff_lng, :recurring_days, :pickup_time, :scheduled_for, :vehicle_class, :requested_at, :client_record, :created_at, :__now) ON CONFLICT (rider_id, id) DO UPDATE SET booking_type = excluded.booking_type, status = excluded.status, pickup_label = excluded.pickup_label, pickup_lat = excluded.pickup_lat, pickup_lng = excluded.pickup_lng, dropoff_label = excluded.dropoff_label, dropoff_lat = excluded.dropoff_lat, dropoff_lng = excluded.dropoff_lng, recurring_days = excluded.recurring_days, pickup_time = excluded.pickup_time, scheduled_for = excluded.scheduled_for, vehicle_class = excluded.vehicle_class, requested_at = excluded.requested_at, client_record = excluded.client_record, updated_at = excluded.updated_at",
         "INSERT INTO quotes (rider_id, id, request_id, vehicle_class, fare_cents, eta_minutes, status, created_at, updated_at) SELECT :__user_id, :quote_id, :request_id, :vehicle_class, :fare_cents, :eta_minutes, 'accepted', :__now, :__now WHERE :quote_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET vehicle_class = excluded.vehicle_class, fare_cents = excluded.fare_cents, eta_minutes = excluded.eta_minutes, updated_at = excluded.updated_at",
         "INSERT INTO assignments (rider_id, id, request_id, driver_id, vehicle_id, status, created_at, updated_at) SELECT :__user_id, :assignment_id, :request_id, :driver_id, :vehicle_id, 'accepted', :__now, :__now WHERE :assignment_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET driver_id = excluded.driver_id, vehicle_id = excluded.vehicle_id, updated_at = excluded.updated_at",
-        "INSERT INTO trips (rider_id, id, request_id, assignment_id, status, created_at, updated_at) SELECT :__user_id, :trip_id, :request_id, :assignment_id, :trip_status, :__now, :__now WHERE :trip_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET assignment_id = excluded.assignment_id, status = excluded.status, updated_at = excluded.updated_at",
-        "INSERT OR IGNORE INTO trip_events (rider_id, id, trip_id, type, status, at) SELECT :__user_id, :trip_event_id, :trip_id, 'status', :trip_status, :__now WHERE :trip_event_id IS NOT NULL"
+        "INSERT OR IGNORE INTO trip_transitions (rider_id, id, trip_id, from_status, to_status, actor_type, actor_id, metadata, at) SELECT :__user_id, :trip_event_id, :trip_id, CASE WHEN c.cur = :trip_status THEN NULL ELSE c.cur END, :trip_status, 'rider', :__user_id, '{\"source\":\"save_ride\"}', :__now FROM (SELECT (SELECT t.status FROM trips t WHERE t.rider_id = :__user_id AND t.id = :trip_id) AS cur) c WHERE :trip_event_id IS NOT NULL AND (c.cur IS NULL OR c.cur = :trip_status OR (c.cur IN ('scheduled', 'en_route', 'arrived') AND CASE :trip_status WHEN 'scheduled' THEN 0 WHEN 'en_route' THEN 1 WHEN 'arrived' THEN 2 WHEN 'completed' THEN 3 END > CASE c.cur WHEN 'scheduled' THEN 0 WHEN 'en_route' THEN 1 WHEN 'arrived' THEN 2 WHEN 'completed' THEN 3 END))",
+        "INSERT INTO trips (rider_id, id, request_id, assignment_id, status, created_at, updated_at) SELECT :__user_id, :trip_id, :request_id, :assignment_id, :trip_status, :__now, :__now WHERE :trip_id IS NOT NULL ON CONFLICT (rider_id, id) DO UPDATE SET assignment_id = excluded.assignment_id, status = CASE WHEN trips.status IN ('scheduled', 'en_route', 'arrived') AND CASE excluded.status WHEN 'scheduled' THEN 0 WHEN 'en_route' THEN 1 WHEN 'arrived' THEN 2 WHEN 'completed' THEN 3 END > CASE trips.status WHEN 'scheduled' THEN 0 WHEN 'en_route' THEN 1 WHEN 'arrived' THEN 2 WHEN 'completed' THEN 3 END THEN excluded.status ELSE trips.status END, updated_at = excluded.updated_at",
+        "INSERT OR IGNORE INTO trip_events (rider_id, id, trip_id, type, status, at) SELECT :__user_id, :trip_event_id, :trip_id, 'status', :trip_status, :__now WHERE :trip_event_id IS NOT NULL AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = :__user_id AND t.id = :trip_id AND t.status = :trip_status)"
       ],
       "params": {
         "request_id": {
@@ -128,6 +129,8 @@
       "description": "Cancel one of the caller's ride requests and any unfinished trip for it",
       "operation": "batch",
       "statements": [
+        "INSERT OR IGNORE INTO trip_transitions (rider_id, id, trip_id, from_status, to_status, actor_type, actor_id, metadata, at) SELECT :__user_id, t.id || ':' || 'cancelled', t.id, t.status, 'cancelled', 'rider', :__user_id, '{\"source\":\"cancel_ride\"}', :__now FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status NOT IN ('completed', 'cancelled')",
+        "INSERT OR IGNORE INTO trip_events (rider_id, id, trip_id, type, status, at) SELECT :__user_id, t.id || ':' || 'cancelled', t.id, 'status', 'cancelled', :__now FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status NOT IN ('completed', 'cancelled')",
         "UPDATE ride_requests SET status = 'cancelled', updated_at = :__now WHERE rider_id = :__user_id AND id = :request_id",
         "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE rider_id = :__user_id AND request_id = :request_id AND status NOT IN ('completed', 'cancelled')"
       ],
@@ -149,6 +152,98 @@
           "default": 50,
           "max": 200,
           "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "advance_trip",
+      "description": "Driver action: move a trip assigned to the caller's driver account one step (scheduled -> en_route -> arrived -> completed) or cancel it. Invalid transitions, unassigned trips and other drivers' trips change nothing. Records actor, time and optional metadata in trip_transitions.",
+      "operation": "batch",
+      "statements": [
+        "INSERT OR IGNORE INTO trip_transitions (rider_id, id, trip_id, from_status, to_status, actor_type, actor_id, metadata, at) SELECT t.rider_id, t.id || ':' || :to_status, t.id, t.status, :to_status, 'driver', :__user_id, :metadata, :__now FROM trips t JOIN assignments a ON a.rider_id = t.rider_id AND a.id = t.assignment_id JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND d.user_id = :__user_id AND ((t.status = 'scheduled' AND :to_status IN ('en_route', 'cancelled')) OR (t.status = 'en_route' AND :to_status IN ('arrived', 'cancelled')) OR (t.status = 'arrived' AND :to_status IN ('completed', 'cancelled')))",
+        "INSERT OR IGNORE INTO trip_events (rider_id, id, trip_id, type, status, at) SELECT x.rider_id, x.trip_id || ':' || x.to_status, x.trip_id, 'status', x.to_status, x.at FROM trip_transitions x WHERE x.rider_id = :rider_id AND x.trip_id = :trip_id AND x.to_status = :to_status AND x.actor_id = :__user_id",
+        "UPDATE trips SET status = :to_status, updated_at = :__now WHERE rider_id = :rider_id AND id = :trip_id AND ((trips.status = 'scheduled' AND :to_status IN ('en_route', 'cancelled')) OR (trips.status = 'en_route' AND :to_status IN ('arrived', 'cancelled')) OR (trips.status = 'arrived' AND :to_status IN ('completed', 'cancelled'))) AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = trips.rider_id AND a.id = trips.assignment_id AND d.user_id = :__user_id)",
+        "UPDATE ride_requests SET status = CASE WHEN :to_status = 'completed' THEN 'completed' ELSE 'cancelled' END, updated_at = :__now WHERE rider_id = :rider_id AND :to_status IN ('completed', 'cancelled') AND id = (SELECT t.request_id FROM trips t JOIN assignments a ON a.rider_id = t.rider_id AND a.id = t.assignment_id JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND d.user_id = :__user_id AND t.status = :to_status)"
+      ],
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "trip_id": {
+          "type": "string"
+        },
+        "to_status": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "string",
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "list_my_trips",
+      "description": "List the caller's trips as a rider, newest first, optionally filtered by status",
+      "operation": "query",
+      "sql": "SELECT t.id, t.request_id, t.assignment_id, t.status, t.created_at, t.updated_at, r.pickup_label, r.dropoff_label FROM trips t JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id WHERE t.rider_id = :__user_id AND (:status IS NULL OR t.status = :status) ORDER BY t.updated_at DESC LIMIT :limit",
+      "params": {
+        "status": {
+          "type": "string",
+          "optional": true
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50,
+          "max": 200,
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "get_my_trip_history",
+      "description": "The caller's append-only transition history for one of their trips, oldest first (who moved it, when, and metadata)",
+      "operation": "query",
+      "sql": "SELECT id, from_status, to_status, actor_type, actor_id, metadata, at FROM trip_transitions WHERE rider_id = :__user_id AND trip_id = :trip_id ORDER BY at, rowid",
+      "params": {
+        "trip_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "list_driver_trips",
+      "description": "List trips assigned to the caller's linked driver account, newest first, optionally filtered by status",
+      "operation": "query",
+      "sql": "SELECT t.rider_id, t.id, t.request_id, t.status, t.created_at, t.updated_at, r.pickup_label, r.dropoff_label, r.scheduled_for FROM trips t JOIN assignments a ON a.rider_id = t.rider_id AND a.id = t.assignment_id JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id WHERE d.user_id = :__user_id AND (:status IS NULL OR t.status = :status) ORDER BY t.updated_at DESC LIMIT :limit",
+      "params": {
+        "status": {
+          "type": "string",
+          "optional": true
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50,
+          "max": 200,
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "get_driver_trip_history",
+      "description": "Transition history for one trip assigned to the caller's linked driver account, oldest first",
+      "operation": "query",
+      "sql": "SELECT x.id, x.from_status, x.to_status, x.actor_type, x.metadata, x.at FROM trip_transitions x JOIN trips t ON t.rider_id = x.rider_id AND t.id = x.trip_id JOIN assignments a ON a.rider_id = t.rider_id AND a.id = t.assignment_id JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE x.rider_id = :rider_id AND x.trip_id = :trip_id AND d.user_id = :__user_id ORDER BY x.at, x.rowid",
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "trip_id": {
+          "type": "string"
         }
       },
       "requires_auth": true

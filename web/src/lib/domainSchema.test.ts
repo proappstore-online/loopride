@@ -246,3 +246,119 @@ describe('domain schema + legacy ride migration', () => {
     expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'matched' })
   })
 })
+
+describe('trip persistence and transition history', () => {
+  let db: Db
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const history = (tripId = 'now-1:trip') =>
+    db.prepare('SELECT from_status, to_status, actor_type, actor_id, metadata, at FROM trip_transitions WHERE trip_id = ? ORDER BY at, rowid').all(tripId)
+  const tripStatus = () => (db.prepare('SELECT status FROM trips').get() as { status: string }).status
+  /** Link the ride's driver to a PAS account (the claim flow is not built yet). */
+  const linkDriver = (userId: string) => db.prepare('UPDATE drivers SET user_id = ?').run(userId)
+  const advance = (userId: string, to: string, metadata?: string, riderId = 'user-a', now = 5_000) =>
+    call(db, 'advance_trip', { rider_id: riderId, trip_id: 'now-1:trip', to_status: to, metadata }, userId, now)
+
+  it('records actor, timestamp and metadata for rider-synced transitions', () => {
+    call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
+    call(db, 'save_ride', { ...rideToRecords({ ...onDemandRide, status: 'arrived' }) }, 'user-a', 2_000)
+    expect(history()).toEqual([
+      { from_status: null, to_status: 'en_route', actor_type: 'rider', actor_id: 'user-a', metadata: '{"source":"save_ride"}', at: 1_000 },
+      { from_status: 'en_route', to_status: 'arrived', actor_type: 'rider', actor_id: 'user-a', metadata: '{"source":"save_ride"}', at: 2_000 },
+    ])
+  })
+
+  it('replaying saves does not duplicate history', () => {
+    for (const now of [1_000, 2_000, 3_000]) call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', now)
+    expect(history()).toHaveLength(1)
+    expect(count(db, 'trip_events')).toBe(1)
+  })
+
+  it('save_ride never moves a trip backwards or out of a terminal state', () => {
+    call(db, 'save_ride', { ...rideToRecords({ ...onDemandRide, status: 'arrived' }) }, 'user-a', 1_000)
+    call(db, 'save_ride', { ...rideToRecords({ ...onDemandRide, status: 'en-route' }) }, 'user-a', 2_000)
+    expect(tripStatus()).toBe('arrived')
+    call(db, 'save_ride', { ...rideToRecords({ ...onDemandRide, status: 'completed' }) }, 'user-a', 3_000)
+    call(db, 'save_ride', { ...rideToRecords({ ...onDemandRide, status: 'arrived' }) }, 'user-a', 4_000)
+    expect(tripStatus()).toBe('completed')
+    expect(history().map((h) => (h as { to_status: string }).to_status)).toEqual(['arrived', 'completed'])
+    expect(count(db, 'trip_events')).toBe(2)
+  })
+
+  it('cancel_ride records a cancelled transition only for unfinished trips', () => {
+    call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
+    call(db, 'cancel_ride', { request_id: 'now-1' }, 'user-b', 2_000)
+    expect(history()).toHaveLength(1)
+    call(db, 'cancel_ride', { request_id: 'now-1' }, 'user-a', 3_000)
+    call(db, 'cancel_ride', { request_id: 'now-1' }, 'user-a', 4_000)
+    expect(history()[1]).toMatchObject({ from_status: 'en_route', to_status: 'cancelled', actor_type: 'rider', actor_id: 'user-a', at: 3_000 })
+    expect(history()).toHaveLength(2)
+    expect(tripStatus()).toBe('cancelled')
+  })
+
+  it('a linked driver advances the trip one valid step at a time', () => {
+    call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
+    linkDriver('driver-1')
+    advance('driver-1', 'completed') // skips arrived — invalid
+    expect(tripStatus()).toBe('en_route')
+    advance('driver-1', 'arrived', '{"lat":-33.86}', 'user-a', 2_000)
+    advance('driver-1', 'arrived', undefined, 'user-a', 2_500) // replay — no-op
+    advance('driver-1', 'completed', undefined, 'user-a', 3_000)
+    advance('driver-1', 'en_route', undefined, 'user-a', 4_000) // terminal — no-op
+    expect(tripStatus()).toBe('completed')
+    expect(history().slice(1)).toEqual([
+      { from_status: 'en_route', to_status: 'arrived', actor_type: 'driver', actor_id: 'driver-1', metadata: '{"lat":-33.86}', at: 2_000 },
+      { from_status: 'arrived', to_status: 'completed', actor_type: 'driver', actor_id: 'driver-1', metadata: null, at: 3_000 },
+    ])
+    expect(db.prepare('SELECT status FROM trip_events ORDER BY at').all().map((e) => (e as { status: string }).status)).toEqual([
+      'en_route',
+      'arrived',
+      'completed',
+    ])
+    expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'completed' })
+  })
+
+  it('advance_trip is refused for anyone but the assigned driver', () => {
+    call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
+    linkDriver('driver-1')
+    advance('driver-2', 'arrived') // other driver
+    advance('user-a', 'arrived') // the rider is not the driver
+    advance('driver-1', 'arrived', undefined, 'user-b') // wrong rider scope
+    expect(tripStatus()).toBe('en_route')
+    expect(history()).toHaveLength(1)
+  })
+
+  it('a driver can cancel, which cancels the ride request', () => {
+    call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
+    linkDriver('driver-1')
+    advance('driver-1', 'cancelled', '{"reason":"vehicle fault"}')
+    expect(tripStatus()).toBe('cancelled')
+    expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'cancelled' })
+    expect(history()[1]).toMatchObject({ to_status: 'cancelled', actor_type: 'driver', metadata: '{"reason":"vehicle fault"}' })
+  })
+
+  it('rider queries are scoped to the caller', () => {
+    call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
+    expect(call(db, 'list_my_trips', {}, 'user-a')).toMatchObject([{ id: 'now-1:trip', status: 'en_route', pickup_label: 'Central Station' }])
+    expect(call(db, 'list_my_trips', { status: 'completed' }, 'user-a')).toEqual([])
+    expect(call(db, 'list_my_trips', {}, 'user-b')).toEqual([])
+    expect(call(db, 'get_my_trip_history', { trip_id: 'now-1:trip' }, 'user-a')).toHaveLength(1)
+    expect(call(db, 'get_my_trip_history', { trip_id: 'now-1:trip' }, 'user-b')).toEqual([])
+  })
+
+  it('driver queries only see trips assigned to the linked account', () => {
+    call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
+    expect(call(db, 'list_driver_trips', {}, 'driver-1')).toEqual([]) // not linked yet
+    linkDriver('driver-1')
+    expect(call(db, 'list_driver_trips', {}, 'driver-1')).toMatchObject([{ rider_id: 'user-a', id: 'now-1:trip', status: 'en_route' }])
+    expect(call(db, 'list_driver_trips', {}, 'driver-2')).toEqual([])
+    const args = { rider_id: 'user-a', trip_id: 'now-1:trip' }
+    expect(call(db, 'get_driver_trip_history', args, 'driver-1')).toHaveLength(1)
+    expect(call(db, 'get_driver_trip_history', args, 'driver-2')).toEqual([])
+    expect(call(db, 'get_driver_trip_history', args, 'user-a')).toEqual([])
+  })
+})

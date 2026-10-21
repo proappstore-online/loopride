@@ -56,6 +56,35 @@ built yet.
 Live GPS positions stay ephemeral (PAS rooms / BroadcastChannel) and are not
 trip events.
 
+## Trip history and transitions (issue #2)
+
+`trips` holds the current state; `trip_transitions` (migration `0002_trip_history`)
+is the append-only audit log. Each row records `from_status`, `to_status`,
+`actor_type` (`rider` / `driver` / `system`), `actor_id` (the PAS user), `at` and
+free-form JSON `metadata`. Nothing updates or deletes it. `trip_events` keeps its
+one-row-per-status-reached role.
+
+Valid moves: `scheduled → en_route → arrived → completed`, and any unfinished
+state → `cancelled`. `completed` and `cancelled` are terminal. Enforcement is in
+the action SQL (D1 has no stored procedures), and an invalid or replayed move is
+a silent no-op rather than an error:
+
+- `advance_trip` (driver): strict single steps or cancel, only for a trip whose
+  assignment's driver has `drivers.user_id = :__user_id`. Completing or
+  cancelling also updates the ride request.
+- `save_ride` (rider sync): forward-only. It never moves a trip backwards or out
+  of a terminal state, so Undo of a cancel reopens the ride request but not the
+  cancelled trip. Re-saving an existing trip with no history backfills one
+  transition with a null `from_status`.
+- `cancel_ride` (rider): records a `cancelled` transition for unfinished trips.
+
+Read paths, all scoped to the caller: `list_my_trips`, `get_my_trip_history`
+(rider, `rider_id = :__user_id`) and `list_driver_trips`,
+`get_driver_trip_history` (driver, via `drivers.user_id`).
+
+**Not built yet:** a flow that sets `drivers.user_id` (a driver claiming their
+account). Until then the driver actions return nothing and change nothing.
+
 ## Migrating legacy rides
 
 Existing rides live in localStorage (`loopride.rides.v2`, which already absorbs
