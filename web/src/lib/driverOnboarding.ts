@@ -157,8 +157,9 @@ export const setAvailability = (available: boolean, vehicleId: string | null) =>
 export interface ApplicationSummary {
   user_id: string
   status: ApplicationStatus
-  full_name: string | null
-  phone: string | null
+  /** First initial only: full details need the ops_pii role and a logged reason. */
+  initial: string | null
+  phone_masked: string | null
   licence_last4: string | null
   licence_region: string | null
   licence_expires: string | null
@@ -166,7 +167,7 @@ export interface ApplicationSummary {
   vehicle_count: number
 }
 
-export type Decision = 'approved' | 'rejected' | 'suspended'
+export type Decision = 'approved' | 'rejected'
 
 /** True when the signed-in user holds the `ops` app role. The platform re-checks it on every ops action. */
 export async function hasOpsRole(): Promise<boolean> {
@@ -185,8 +186,7 @@ export const reviewApplication = (driverUserId: string, decision: Decision, reas
 
 /** Which decisions are offered for an application in a given state. Mirrors the server's transition rules. */
 export function decisionsFor(status: ApplicationStatus): Decision[] {
+  // Suspending and reinstating need a reason code and live in the operations console.
   if (status === 'submitted') return ['approved', 'rejected']
-  if (status === 'approved') return ['suspended']
-  if (status === 'suspended') return ['approved']
   return []
 }

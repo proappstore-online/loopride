@@ -126,7 +126,7 @@
     },
     {
       "name": "cancel_ride",
-      "description": "Rider: cancel one of the caller's ride requests. A matched trip is cancelled with a recorded reason (changed_plans, wait_too_long, wrong_pickup, found_other, other) and a fee under the cancellation policy: free before a driver is assigned and within 2 minutes of assignment, 5.00 later (capped at the fare), 8.00 once the driver has arrived. A trip that has started or finished cannot be cancelled by the rider; completed history is never rewritten. Withdraws any dispatch offer. Deletes the trip's live location. Finalizes the immutable fare statement for the trip. Queues in-app and push notifications for the other party.",
+      "description": "Rider: cancel one of the caller's ride requests. A matched trip is cancelled with a recorded reason (changed_plans, wait_too_long, wrong_pickup, found_other, other) and a fee under the cancellation policy: free before a driver is assigned and within 2 minutes of assignment, 5.00 later (capped at the fare), 8.00 once the driver has arrived. A trip that has started or finished cannot be cancelled by the rider; completed history is never rewritten. Withdraws any dispatch offer. Deletes the trip's live location. Finalizes the immutable fare statement for the trip. Queues in-app and push notifications for the other party. Keeps a coarse position snapshot as dispute evidence for 30 days.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL",
@@ -139,6 +139,7 @@
         "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE status IN ('searching', 'matched') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_requests.rider_id AND t.request_id = dispatch_requests.request_id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "INSERT OR IGNORE INTO notifications (user_id, id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id, created_at, read_at, push_status, push_attempts, push_next_at, push_error, email_status, email_attempts, email_next_at, email_error) SELECT c.recipient, c.nid, 'trip_cancelled', 'driver', c.trip_id, c.request_id, c.rider_id, c.link, c.params, 1, :__user_id, :__now, NULL, CASE WHEN coalesce(np.push, 1) = 1 THEN 'pending' ELSE 'skipped' END, 0, :__now, NULL, CASE WHEN 1 = 1 AND coalesce(np.email_fallback, 0) = 1 AND coalesce(np.push, 1) = 0 THEN 'pending' ELSE 'none' END, 0, :__now, NULL FROM (SELECT (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS recipient, t.id || ':' || 'trip_cancelled' || ':' || 'driver' AS nid, t.id AS trip_id, t.request_id AS request_id, t.rider_id AS rider_id, '/driver/trip/' || t.rider_id || '/' || t.request_id AS link, json_object('by', 'rider', 'reason', (SELECT l.cancel_code FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id), 'fee_cents', (SELECT l.cancel_fee_cents FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id)) AS params FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL) c LEFT JOIN notification_prefs np ON np.user_id = c.recipient WHERE c.recipient IS NOT NULL AND c.recipient != :__user_id",
         "INSERT OR IGNORE INTO fare_statements (rider_id, trip_id, request_id, driver_user_id, receipt_no, basis, currency, quote_id, quoted_cents, base_cents, distance_cents, time_cents, booking_fee_cents, min_adjust_cents, surge_milli, final_cents, tax_rate_bp, tax_cents, commission_bp, platform_fee_cents, driver_payout_cents, policy_version, outcome, pickup_label, dropoff_label, finalized_at) SELECT c.rider_id, c.trip_id, c.request_id, c.driver_user_id, 'RCT-' || substr(:__uuid, 1, 8), c.basis, 'USD', c.quote_id, c.quoted, c.base, c.dist, c.tim, c.fee, c.adj, c.surge, c.final, 0, c.final - (c.final * 10000 + 5000) / 10000, 0, (c.final * 0 + 5000) / 10000, c.final - (c.final - (c.final * 10000 + 5000) / 10000) - (c.final * 0 + 5000) / 10000, 'v0-unconfigured', c.outcome, c.pickup, c.dropoff, :__now FROM (SELECT t.rider_id AS rider_id, t.id AS trip_id, t.request_id AS request_id, (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS driver_user_id, l.outcome AS outcome, CASE WHEN l.outcome = 'completed' THEN 'fare' WHEN l.outcome = 'rider_no_show' AND l.cancel_fee_cents > 0 THEN 'no_show_fee' WHEN l.cancel_fee_cents > 0 THEN 'cancellation_fee' ELSE 'none' END AS basis, f.id AS quote_id, coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) AS quoted, f.base_cents AS base, f.distance_cents AS dist, f.time_cents AS tim, f.booking_fee_cents AS fee, f.min_adjust_cents AS adj, f.surge_milli AS surge, CASE WHEN l.outcome = 'completed' THEN coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) ELSE l.cancel_fee_cents END AS final, r.pickup_label AS pickup, r.dropoff_label AS dropoff FROM trips t JOIN trip_lifecycle l ON l.rider_id = t.rider_id AND l.trip_id = t.id JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id LEFT JOIN fare_quotes f ON f.rider_id = t.rider_id AND f.ride_id = t.request_id AND f.status = 'accepted' WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL) c",
+        "INSERT OR IGNORE INTO trip_evidence (rider_id, trip_id, kind, lat, lng, accuracy_m, age_ms, captured_at) SELECT l.rider_id, l.trip_id, 'ended', l.lat, l.lng, l.accuracy_m, :__now - l.updated_at, :__now FROM trip_locations l JOIN trips t ON t.rider_id = l.rider_id AND t.id = l.trip_id WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - l.updated_at <= 60000",
         "DELETE FROM trip_locations WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE rider_id = :__user_id AND request_id = :request_id AND status IN ('offered', 'accepted') AND NOT EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND (t.status = 'completed' OR (t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)))",
@@ -177,7 +178,7 @@
     },
     {
       "name": "advance_trip",
-      "description": "Driver: move the assigned trip one step: scheduled -> en_route -> arrived, and arrived -> completed only after start_trip. Cancelling is a separate action (driver_cancel_trip). Invalid transitions, repeated requests, unassigned trips and other drivers' trips change nothing and write no audit row. Completing releases the driver's dispatch lock and completes the ride request. Completing deletes the trip's live location. Finalizes the immutable fare statement for the trip. Queues in-app and push notifications for the other party.",
+      "description": "Driver: move the assigned trip one step: scheduled -> en_route -> arrived, and arrived -> completed only after start_trip. Cancelling is a separate action (driver_cancel_trip). Invalid transitions, repeated requests, unassigned trips and other drivers' trips change nothing and write no audit row. Completing releases the driver's dispatch lock and completes the ride request. Completing deletes the trip's live location. Finalizes the immutable fare statement for the trip. Queues in-app and push notifications for the other party. Keeps a coarse position snapshot as dispute evidence for 30 days.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL))",
@@ -191,6 +192,7 @@
         "INSERT OR IGNORE INTO notifications (user_id, id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id, created_at, read_at, push_status, push_attempts, push_next_at, push_error, email_status, email_attempts, email_next_at, email_error) SELECT c.recipient, c.nid, 'driver_arrived', 'rider', c.trip_id, c.request_id, c.rider_id, c.link, c.params, 1, :__user_id, :__now, NULL, CASE WHEN coalesce(np.push, 1) = 1 THEN 'pending' ELSE 'skipped' END, 0, :__now, NULL, CASE WHEN 1 = 1 AND coalesce(np.email_fallback, 0) = 1 AND coalesce(np.push, 1) = 0 THEN 'pending' ELSE 'none' END, 0, :__now, NULL FROM (SELECT t.rider_id AS recipient, t.id || ':' || 'driver_arrived' AS nid, t.id AS trip_id, t.request_id AS request_id, t.rider_id AS rider_id, '/trip/' || t.request_id AS link, json_object() AS params FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)) AND :to_status = 'arrived') c LEFT JOIN notification_prefs np ON np.user_id = c.recipient WHERE c.recipient IS NOT NULL AND c.recipient != :__user_id",
         "INSERT OR IGNORE INTO fare_statements (rider_id, trip_id, request_id, driver_user_id, receipt_no, basis, currency, quote_id, quoted_cents, base_cents, distance_cents, time_cents, booking_fee_cents, min_adjust_cents, surge_milli, final_cents, tax_rate_bp, tax_cents, commission_bp, platform_fee_cents, driver_payout_cents, policy_version, outcome, pickup_label, dropoff_label, finalized_at) SELECT c.rider_id, c.trip_id, c.request_id, c.driver_user_id, 'RCT-' || substr(:__uuid, 1, 8), c.basis, 'USD', c.quote_id, c.quoted, c.base, c.dist, c.tim, c.fee, c.adj, c.surge, c.final, 0, c.final - (c.final * 10000 + 5000) / 10000, 0, (c.final * 0 + 5000) / 10000, c.final - (c.final - (c.final * 10000 + 5000) / 10000) - (c.final * 0 + 5000) / 10000, 'v0-unconfigured', c.outcome, c.pickup, c.dropoff, :__now FROM (SELECT t.rider_id AS rider_id, t.id AS trip_id, t.request_id AS request_id, (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS driver_user_id, l.outcome AS outcome, CASE WHEN l.outcome = 'completed' THEN 'fare' WHEN l.outcome = 'rider_no_show' AND l.cancel_fee_cents > 0 THEN 'no_show_fee' WHEN l.cancel_fee_cents > 0 THEN 'cancellation_fee' ELSE 'none' END AS basis, f.id AS quote_id, coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) AS quoted, f.base_cents AS base, f.distance_cents AS dist, f.time_cents AS tim, f.booking_fee_cents AS fee, f.min_adjust_cents AS adj, f.surge_milli AS surge, CASE WHEN l.outcome = 'completed' THEN coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) ELSE l.cancel_fee_cents END AS final, r.pickup_label AS pickup, r.dropoff_label AS dropoff FROM trips t JOIN trip_lifecycle l ON l.rider_id = t.rider_id AND l.trip_id = t.id JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id LEFT JOIN fare_quotes f ON f.rider_id = t.rider_id AND f.ride_id = t.request_id AND f.status = 'accepted' WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)) AND :to_status = 'completed') c",
         "INSERT OR IGNORE INTO notifications (user_id, id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id, created_at, read_at, push_status, push_attempts, push_next_at, push_error, email_status, email_attempts, email_next_at, email_error) SELECT c.recipient, c.nid, 'receipt_ready', 'rider', c.trip_id, c.request_id, c.rider_id, c.link, c.params, 1, :__user_id, :__now, NULL, CASE WHEN coalesce(np.push, 1) = 1 THEN 'pending' ELSE 'skipped' END, 0, :__now, NULL, CASE WHEN 1 = 1 AND coalesce(np.email_fallback, 0) = 1 AND coalesce(np.push, 1) = 0 THEN 'pending' ELSE 'none' END, 0, :__now, NULL FROM (SELECT t.rider_id AS recipient, t.id || ':' || 'receipt_ready' AS nid, t.id AS trip_id, t.request_id AS request_id, t.rider_id AS rider_id, '/trip/' || t.request_id AS link, json_object('total_cents', (SELECT s.final_cents FROM fare_statements s WHERE s.rider_id = t.rider_id AND s.trip_id = t.id)) AS params FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)) AND :to_status = 'completed') c LEFT JOIN notification_prefs np ON np.user_id = c.recipient WHERE c.recipient IS NOT NULL AND c.recipient != :__user_id",
+        "INSERT OR IGNORE INTO trip_evidence (rider_id, trip_id, kind, lat, lng, accuracy_m, age_ms, captured_at) SELECT l.rider_id, l.trip_id, CASE WHEN :to_status = 'arrived' THEN 'arrived' ELSE 'ended' END, l.lat, l.lng, l.accuracy_m, :__now - l.updated_at, :__now FROM trip_locations l JOIN trips t ON t.rider_id = l.rider_id AND t.id = l.trip_id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)) AND :to_status IN ('arrived', 'completed') AND :__now - l.updated_at <= 60000",
         "DELETE FROM trip_locations WHERE :to_status = 'completed' AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)))",
         "UPDATE trips SET status = :to_status, updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)))"
       ],
@@ -424,9 +426,11 @@
     },
     {
       "name": "delete_my_rider_data",
-      "description": "Erase everything the caller owns as a rider (profile, saved places, requests, quotes, assignments, trips, history, drivers and vehicles they recorded) and unlink the caller's driver account. Irreversible. Also erases quotes, dispatch records, trip lifecycle, events, disputes, fare statements and credits, notifications and notification preferences, and live locations. The caller's driver-side data is erased by delete_my_driver_data.",
+      "description": "Erase everything the caller owns as a rider (profile, saved places, requests, quotes, assignments, trips, history, drivers and vehicles they recorded) and unlink the caller's driver account. Irreversible. Also erases quotes, dispatch records, trip lifecycle, events, disputes, fare statements and credits, notifications and notification preferences, and live locations. The caller's driver-side data is erased by delete_my_driver_data. Also erases coarse trip evidence snapshots and refund requests. Staff escalation records and the PII access log are kept for audit.",
       "operation": "batch",
       "statements": [
+        "DELETE FROM trip_evidence WHERE rider_id = :__user_id",
+        "DELETE FROM refund_requests WHERE rider_id = :__user_id",
         "DELETE FROM notifications WHERE user_id = :__user_id",
         "DELETE FROM notification_prefs WHERE user_id = :__user_id",
         "DELETE FROM fare_adjustments WHERE rider_id = :__user_id",
@@ -598,9 +602,9 @@
     },
     {
       "name": "list_driver_applications",
-      "description": "Ops: driver applications, oldest submission first, optionally by status. Licence number is masked to its last 4 characters. Excludes the caller's own application.",
+      "description": "Ops: driver applications, oldest submission first, optionally by status. Personal details are redacted (first initial, phone's last 2 digits, licence's last 4 characters); full details need ops_pii and a logged reason (ops_log_access, then get_driver_application_detail). Excludes the caller's own application.",
       "operation": "query",
-      "sql": "SELECT a.user_id, a.status, a.full_name, a.phone, substr(a.licence_number, -4) AS licence_last4, a.licence_region, a.licence_expires, a.submitted_at, a.updated_at, (SELECT COUNT(*) FROM driver_vehicles v WHERE v.user_id = a.user_id) AS vehicle_count FROM driver_applications a WHERE a.user_id != :__user_id AND (:status IS NULL OR a.status = :status) ORDER BY a.submitted_at LIMIT :limit",
+      "sql": "SELECT a.user_id, a.status, CASE WHEN a.full_name IS NULL THEN NULL ELSE substr(a.full_name, 1, 1) || '.' END AS initial, CASE WHEN a.phone IS NULL THEN NULL ELSE '***' || substr(a.phone, -2) END AS phone_masked, substr(a.licence_number, -4) AS licence_last4, a.licence_region, a.licence_expires, a.submitted_at, a.updated_at, (SELECT COUNT(*) FROM driver_vehicles v WHERE v.user_id = a.user_id) AS vehicle_count FROM driver_applications a WHERE a.user_id != :__user_id AND (:status IS NULL OR a.status = :status) ORDER BY a.submitted_at LIMIT :limit",
       "params": {
         "status": {
           "type": "string",
@@ -623,9 +627,9 @@
     },
     {
       "name": "get_driver_application_detail",
-      "description": "Ops: one application in full, including the licence number, for verification",
+      "description": "Ops (ops_pii): one application in full, including name, phone and licence number. Returns nothing unless the caller logged a reason for this driver in the last 10 minutes (ops_log_access scope driver_pii).",
       "operation": "query",
-      "sql": "SELECT user_id, status, full_name, phone, licence_number, licence_region, licence_expires, eligibility_confirmed, status_reason, submitted_at, reviewed_at, reviewed_by FROM driver_applications WHERE user_id = :driver_user_id AND user_id != :__user_id",
+      "sql": "SELECT user_id, status, full_name, phone, licence_number, licence_region, licence_expires, eligibility_confirmed, status_reason, submitted_at, reviewed_at, reviewed_by FROM driver_applications WHERE user_id = :driver_user_id AND user_id != :__user_id AND EXISTS (SELECT 1 FROM ops_access_log g WHERE g.actor_id = :__user_id AND g.scope = 'driver_pii' AND g.driver_user_id = :driver_user_id AND g.at > :__now - 600000)",
       "params": {
         "driver_user_id": {
           "type": "string"
@@ -635,7 +639,7 @@
       "auth": {
         "required": true,
         "app_roles": [
-          "ops"
+          "ops_pii"
         ]
       }
     },
@@ -677,13 +681,13 @@
     },
     {
       "name": "review_driver_application",
-      "description": "Ops: decide an application. submitted -> approved|rejected, approved -> suspended, suspended -> approved. Rejecting and suspending need a reason. Approving from submitted also approves the driver's pending vehicles; rejecting or suspending takes the driver off dispatch. Cannot review your own application. Every decision is audited with actor and reason; an invalid move changes nothing.",
+      "description": "Ops: decide a submitted application: approved or rejected. Rejecting needs a reason. Approving also approves the driver's pending vehicles. Cannot review your own application. Audited in the driver review log. Suspending and reinstating a driver are separate actions that require a reason code (ops_suspend_driver, ops_reinstate_driver).",
       "operation": "batch",
       "statements": [
-        "INSERT INTO driver_review_log (id, user_id, vehicle_id, from_status, to_status, reason, actor_id, actor_role, at) SELECT :__uuid, a.user_id, NULL, a.status, :decision, :reason, :__user_id, 'ops', :__now FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND ((a.status = 'submitted' AND :decision IN ('approved', 'rejected')) OR (a.status = 'approved' AND :decision = 'suspended') OR (a.status = 'suspended' AND :decision = 'approved')) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0)",
-        "UPDATE driver_vehicles SET status = 'approved', status_reason = NULL, updated_at = :__now WHERE user_id = :driver_user_id AND status = 'pending' AND :decision = 'approved' AND :driver_user_id != :__user_id AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND ((a.status = 'submitted' AND :decision IN ('approved', 'rejected')) OR (a.status = 'approved' AND :decision = 'suspended') OR (a.status = 'suspended' AND :decision = 'approved')) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0) AND a.status = 'submitted')",
-        "UPDATE driver_availability SET available = 0, updated_at = :__now WHERE user_id = :driver_user_id AND :decision IN ('rejected', 'suspended') AND :driver_user_id != :__user_id AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND ((a.status = 'submitted' AND :decision IN ('approved', 'rejected')) OR (a.status = 'approved' AND :decision = 'suspended') OR (a.status = 'suspended' AND :decision = 'approved')) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0))",
-        "UPDATE driver_applications SET status = :decision, status_reason = CASE WHEN :decision = 'approved' THEN NULL ELSE trim(:reason) END, reviewed_at = :__now, reviewed_by = :__user_id, updated_at = :__now WHERE user_id = :driver_user_id AND user_id != :__user_id AND ((driver_applications.status = 'submitted' AND :decision IN ('approved', 'rejected')) OR (driver_applications.status = 'approved' AND :decision = 'suspended') OR (driver_applications.status = 'suspended' AND :decision = 'approved')) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0)"
+        "INSERT INTO driver_review_log (id, user_id, vehicle_id, from_status, to_status, reason, actor_id, actor_role, at) SELECT :__uuid, a.user_id, NULL, a.status, :decision, :reason, :__user_id, 'ops', :__now FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND ((a.status = 'submitted' AND :decision IN ('approved', 'rejected')) ) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0)",
+        "UPDATE driver_vehicles SET status = 'approved', status_reason = NULL, updated_at = :__now WHERE user_id = :driver_user_id AND status = 'pending' AND :decision = 'approved' AND :driver_user_id != :__user_id AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND ((a.status = 'submitted' AND :decision IN ('approved', 'rejected')) ) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0) AND a.status = 'submitted')",
+        "UPDATE driver_availability SET available = 0, updated_at = :__now WHERE user_id = :driver_user_id AND :decision IN ('rejected', 'suspended') AND :driver_user_id != :__user_id AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND ((a.status = 'submitted' AND :decision IN ('approved', 'rejected')) ) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0))",
+        "UPDATE driver_applications SET status = :decision, status_reason = CASE WHEN :decision = 'approved' THEN NULL ELSE trim(:reason) END, reviewed_at = :__now, reviewed_by = :__user_id, updated_at = :__now WHERE user_id = :driver_user_id AND user_id != :__user_id AND ((driver_applications.status = 'submitted' AND :decision IN ('approved', 'rejected')) ) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0)"
       ],
       "params": {
         "driver_user_id": {
@@ -984,12 +988,13 @@
     },
     {
       "name": "start_trip",
-      "description": "Driver: the rider is on board. Only from arrived, once. Records started_at and a 'started' event; the trip can then be completed, and the rider can no longer cancel it (only operations can). Queues in-app and push notifications for the other party.",
+      "description": "Driver: the rider is on board. Only from arrived, once. Records started_at and a 'started' event; the trip can then be completed, and the rider can no longer cancel it (only operations can). Queues in-app and push notifications for the other party. Keeps a coarse position snapshot as dispute evidence for 30 days.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL",
         "INSERT INTO trip_lifecycle_events (rider_id, id, trip_id, event, actor_id, actor_role, reason_code, note, amount_cents, at) SELECT t.rider_id, :__uuid, t.id, 'started', :__user_id, 'driver', NULL, NULL, NULL, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL",
         "INSERT OR IGNORE INTO notifications (user_id, id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id, created_at, read_at, push_status, push_attempts, push_next_at, push_error, email_status, email_attempts, email_next_at, email_error) SELECT c.recipient, c.nid, 'trip_started', 'rider', c.trip_id, c.request_id, c.rider_id, c.link, c.params, 0, :__user_id, :__now, NULL, CASE WHEN coalesce(np.push, 1) = 1 THEN 'pending' ELSE 'skipped' END, 0, :__now, NULL, CASE WHEN 0 = 1 AND coalesce(np.email_fallback, 0) = 1 AND coalesce(np.push, 1) = 0 THEN 'pending' ELSE 'none' END, 0, :__now, NULL FROM (SELECT t.rider_id AS recipient, t.id || ':' || 'trip_started' AS nid, t.id AS trip_id, t.request_id AS request_id, t.rider_id AS rider_id, '/trip/' || t.request_id AS link, json_object() AS params FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL) c LEFT JOIN notification_prefs np ON np.user_id = c.recipient WHERE c.recipient IS NOT NULL AND c.recipient != :__user_id",
+        "INSERT OR IGNORE INTO trip_evidence (rider_id, trip_id, kind, lat, lng, accuracy_m, age_ms, captured_at) SELECT l.rider_id, l.trip_id, 'started', l.lat, l.lng, l.accuracy_m, :__now - l.updated_at, :__now FROM trip_locations l JOIN trips t ON t.rider_id = l.rider_id AND t.id = l.trip_id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - l.updated_at <= 60000",
         "UPDATE trip_lifecycle SET started_at = :__now, started_by = :__user_id, updated_at = :__now WHERE started_at IS NULL AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_lifecycle.rider_id AND t.id = trip_lifecycle.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)"
       ],
       "params": {
@@ -1004,7 +1009,7 @@
     },
     {
       "name": "driver_cancel_trip",
-      "description": "Driver: cancel the assigned trip before it starts, with a reason (rider_unreachable, vehicle_issue, safety, too_far, other). No fee to the rider; recorded as driver_cancelled for reliability review. Frees the driver's lock and cancels the ride request. Deletes the trip's live location. Finalizes the immutable fare statement for the trip. Queues in-app and push notifications for the other party.",
+      "description": "Driver: cancel the assigned trip before it starts, with a reason (rider_unreachable, vehicle_issue, safety, too_far, other). No fee to the rider; recorded as driver_cancelled for reliability review. Frees the driver's lock and cancels the ride request. Deletes the trip's live location. Finalizes the immutable fare statement for the trip. Queues in-app and push notifications for the other party. Keeps a coarse position snapshot as dispute evidence for 30 days.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL",
@@ -1017,6 +1022,7 @@
         "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE status IN ('searching', 'matched') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_requests.rider_id AND t.request_id = dispatch_requests.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "INSERT OR IGNORE INTO notifications (user_id, id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id, created_at, read_at, push_status, push_attempts, push_next_at, push_error, email_status, email_attempts, email_next_at, email_error) SELECT c.recipient, c.nid, 'trip_cancelled', 'rider', c.trip_id, c.request_id, c.rider_id, c.link, c.params, 1, :__user_id, :__now, NULL, CASE WHEN coalesce(np.push, 1) = 1 THEN 'pending' ELSE 'skipped' END, 0, :__now, NULL, CASE WHEN 1 = 1 AND coalesce(np.email_fallback, 0) = 1 AND coalesce(np.push, 1) = 0 THEN 'pending' ELSE 'none' END, 0, :__now, NULL FROM (SELECT t.rider_id AS recipient, t.id || ':' || 'trip_cancelled' || ':' || 'rider' AS nid, t.id AS trip_id, t.request_id AS request_id, t.rider_id AS rider_id, '/trip/' || t.request_id AS link, json_object('by', 'driver', 'reason', (SELECT l.cancel_code FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id), 'fee_cents', (SELECT l.cancel_fee_cents FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id)) AS params FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL) c LEFT JOIN notification_prefs np ON np.user_id = c.recipient WHERE c.recipient IS NOT NULL AND c.recipient != :__user_id",
         "INSERT OR IGNORE INTO fare_statements (rider_id, trip_id, request_id, driver_user_id, receipt_no, basis, currency, quote_id, quoted_cents, base_cents, distance_cents, time_cents, booking_fee_cents, min_adjust_cents, surge_milli, final_cents, tax_rate_bp, tax_cents, commission_bp, platform_fee_cents, driver_payout_cents, policy_version, outcome, pickup_label, dropoff_label, finalized_at) SELECT c.rider_id, c.trip_id, c.request_id, c.driver_user_id, 'RCT-' || substr(:__uuid, 1, 8), c.basis, 'USD', c.quote_id, c.quoted, c.base, c.dist, c.tim, c.fee, c.adj, c.surge, c.final, 0, c.final - (c.final * 10000 + 5000) / 10000, 0, (c.final * 0 + 5000) / 10000, c.final - (c.final - (c.final * 10000 + 5000) / 10000) - (c.final * 0 + 5000) / 10000, 'v0-unconfigured', c.outcome, c.pickup, c.dropoff, :__now FROM (SELECT t.rider_id AS rider_id, t.id AS trip_id, t.request_id AS request_id, (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS driver_user_id, l.outcome AS outcome, CASE WHEN l.outcome = 'completed' THEN 'fare' WHEN l.outcome = 'rider_no_show' AND l.cancel_fee_cents > 0 THEN 'no_show_fee' WHEN l.cancel_fee_cents > 0 THEN 'cancellation_fee' ELSE 'none' END AS basis, f.id AS quote_id, coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) AS quoted, f.base_cents AS base, f.distance_cents AS dist, f.time_cents AS tim, f.booking_fee_cents AS fee, f.min_adjust_cents AS adj, f.surge_milli AS surge, CASE WHEN l.outcome = 'completed' THEN coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) ELSE l.cancel_fee_cents END AS final, r.pickup_label AS pickup, r.dropoff_label AS dropoff FROM trips t JOIN trip_lifecycle l ON l.rider_id = t.rider_id AND l.trip_id = t.id JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id LEFT JOIN fare_quotes f ON f.rider_id = t.rider_id AND f.ride_id = t.request_id AND f.status = 'accepted' WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL) c",
+        "INSERT OR IGNORE INTO trip_evidence (rider_id, trip_id, kind, lat, lng, accuracy_m, age_ms, captured_at) SELECT l.rider_id, l.trip_id, 'ended', l.lat, l.lng, l.accuracy_m, :__now - l.updated_at, :__now FROM trip_locations l JOIN trips t ON t.rider_id = l.rider_id AND t.id = l.trip_id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - l.updated_at <= 60000",
         "DELETE FROM trip_locations WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)"
       ],
@@ -1039,7 +1045,7 @@
     },
     {
       "name": "report_rider_no_show",
-      "description": "Driver: the rider did not show. Allowed only once the driver has been at the pickup for 5 minutes and the trip has not started. Cancels the trip as rider_no_show and records the no-show fee (8.00, capped at the fare). Deletes the trip's live location. Finalizes the immutable fare statement for the trip. Queues in-app and push notifications for the other party.",
+      "description": "Driver: the rider did not show. Allowed only once the driver has been at the pickup for 5 minutes and the trip has not started. Cancels the trip as rider_no_show and records the no-show fee (8.00, capped at the fare). Deletes the trip's live location. Finalizes the immutable fare statement for the trip. Queues in-app and push notifications for the other party. Keeps a coarse position snapshot as dispute evidence for 30 days.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000",
@@ -1052,6 +1058,7 @@
         "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE status IN ('searching', 'matched') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_requests.rider_id AND t.request_id = dispatch_requests.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000)",
         "INSERT OR IGNORE INTO notifications (user_id, id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id, created_at, read_at, push_status, push_attempts, push_next_at, push_error, email_status, email_attempts, email_next_at, email_error) SELECT c.recipient, c.nid, 'rider_no_show', 'rider', c.trip_id, c.request_id, c.rider_id, c.link, c.params, 1, :__user_id, :__now, NULL, CASE WHEN coalesce(np.push, 1) = 1 THEN 'pending' ELSE 'skipped' END, 0, :__now, NULL, CASE WHEN 1 = 1 AND coalesce(np.email_fallback, 0) = 1 AND coalesce(np.push, 1) = 0 THEN 'pending' ELSE 'none' END, 0, :__now, NULL FROM (SELECT t.rider_id AS recipient, t.id || ':' || 'rider_no_show' || ':' || 'rider' AS nid, t.id AS trip_id, t.request_id AS request_id, t.rider_id AS rider_id, '/trip/' || t.request_id AS link, json_object('fee_cents', (SELECT l.cancel_fee_cents FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id)) AS params FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000) c LEFT JOIN notification_prefs np ON np.user_id = c.recipient WHERE c.recipient IS NOT NULL AND c.recipient != :__user_id",
         "INSERT OR IGNORE INTO fare_statements (rider_id, trip_id, request_id, driver_user_id, receipt_no, basis, currency, quote_id, quoted_cents, base_cents, distance_cents, time_cents, booking_fee_cents, min_adjust_cents, surge_milli, final_cents, tax_rate_bp, tax_cents, commission_bp, platform_fee_cents, driver_payout_cents, policy_version, outcome, pickup_label, dropoff_label, finalized_at) SELECT c.rider_id, c.trip_id, c.request_id, c.driver_user_id, 'RCT-' || substr(:__uuid, 1, 8), c.basis, 'USD', c.quote_id, c.quoted, c.base, c.dist, c.tim, c.fee, c.adj, c.surge, c.final, 0, c.final - (c.final * 10000 + 5000) / 10000, 0, (c.final * 0 + 5000) / 10000, c.final - (c.final - (c.final * 10000 + 5000) / 10000) - (c.final * 0 + 5000) / 10000, 'v0-unconfigured', c.outcome, c.pickup, c.dropoff, :__now FROM (SELECT t.rider_id AS rider_id, t.id AS trip_id, t.request_id AS request_id, (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS driver_user_id, l.outcome AS outcome, CASE WHEN l.outcome = 'completed' THEN 'fare' WHEN l.outcome = 'rider_no_show' AND l.cancel_fee_cents > 0 THEN 'no_show_fee' WHEN l.cancel_fee_cents > 0 THEN 'cancellation_fee' ELSE 'none' END AS basis, f.id AS quote_id, coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) AS quoted, f.base_cents AS base, f.distance_cents AS dist, f.time_cents AS tim, f.booking_fee_cents AS fee, f.min_adjust_cents AS adj, f.surge_milli AS surge, CASE WHEN l.outcome = 'completed' THEN coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) ELSE l.cancel_fee_cents END AS final, r.pickup_label AS pickup, r.dropoff_label AS dropoff FROM trips t JOIN trip_lifecycle l ON l.rider_id = t.rider_id AND l.trip_id = t.id JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id LEFT JOIN fare_quotes f ON f.rider_id = t.rider_id AND f.ride_id = t.request_id AND f.status = 'accepted' WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000) c",
+        "INSERT OR IGNORE INTO trip_evidence (rider_id, trip_id, kind, lat, lng, accuracy_m, age_ms, captured_at) SELECT l.rider_id, l.trip_id, 'ended', l.lat, l.lng, l.accuracy_m, :__now - l.updated_at, :__now FROM trip_locations l JOIN trips t ON t.rider_id = l.rider_id AND t.id = l.trip_id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000 AND :__now - l.updated_at <= 60000",
         "DELETE FROM trip_locations WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000)",
         "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000)"
       ],
@@ -1071,7 +1078,7 @@
     },
     {
       "name": "report_driver_no_show",
-      "description": "Rider: the driver never arrived. Allowed only 15 minutes after assignment while the driver has not arrived. Cancels the trip as driver_no_show with no fee to the rider; the rider can request a new ride. Deletes the trip's live location. Finalizes the immutable fare statement for the trip. Queues in-app and push notifications for the other party.",
+      "description": "Rider: the driver never arrived. Allowed only 15 minutes after assignment while the driver has not arrived. Cancels the trip as driver_no_show with no fee to the rider; the rider can request a new ride. Deletes the trip's live location. Finalizes the immutable fare statement for the trip. Queues in-app and push notifications for the other party. Keeps a coarse position snapshot as dispute evidence for 30 days.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000",
@@ -1084,6 +1091,7 @@
         "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE status IN ('searching', 'matched') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_requests.rider_id AND t.request_id = dispatch_requests.request_id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000)",
         "INSERT OR IGNORE INTO notifications (user_id, id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id, created_at, read_at, push_status, push_attempts, push_next_at, push_error, email_status, email_attempts, email_next_at, email_error) SELECT c.recipient, c.nid, 'driver_no_show', 'driver', c.trip_id, c.request_id, c.rider_id, c.link, c.params, 1, :__user_id, :__now, NULL, CASE WHEN coalesce(np.push, 1) = 1 THEN 'pending' ELSE 'skipped' END, 0, :__now, NULL, CASE WHEN 1 = 1 AND coalesce(np.email_fallback, 0) = 1 AND coalesce(np.push, 1) = 0 THEN 'pending' ELSE 'none' END, 0, :__now, NULL FROM (SELECT (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS recipient, t.id || ':' || 'driver_no_show' || ':' || 'driver' AS nid, t.id AS trip_id, t.request_id AS request_id, t.rider_id AS rider_id, '/driver/trip/' || t.rider_id || '/' || t.request_id AS link, json_object() AS params FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000) c LEFT JOIN notification_prefs np ON np.user_id = c.recipient WHERE c.recipient IS NOT NULL AND c.recipient != :__user_id",
         "INSERT OR IGNORE INTO fare_statements (rider_id, trip_id, request_id, driver_user_id, receipt_no, basis, currency, quote_id, quoted_cents, base_cents, distance_cents, time_cents, booking_fee_cents, min_adjust_cents, surge_milli, final_cents, tax_rate_bp, tax_cents, commission_bp, platform_fee_cents, driver_payout_cents, policy_version, outcome, pickup_label, dropoff_label, finalized_at) SELECT c.rider_id, c.trip_id, c.request_id, c.driver_user_id, 'RCT-' || substr(:__uuid, 1, 8), c.basis, 'USD', c.quote_id, c.quoted, c.base, c.dist, c.tim, c.fee, c.adj, c.surge, c.final, 0, c.final - (c.final * 10000 + 5000) / 10000, 0, (c.final * 0 + 5000) / 10000, c.final - (c.final - (c.final * 10000 + 5000) / 10000) - (c.final * 0 + 5000) / 10000, 'v0-unconfigured', c.outcome, c.pickup, c.dropoff, :__now FROM (SELECT t.rider_id AS rider_id, t.id AS trip_id, t.request_id AS request_id, (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS driver_user_id, l.outcome AS outcome, CASE WHEN l.outcome = 'completed' THEN 'fare' WHEN l.outcome = 'rider_no_show' AND l.cancel_fee_cents > 0 THEN 'no_show_fee' WHEN l.cancel_fee_cents > 0 THEN 'cancellation_fee' ELSE 'none' END AS basis, f.id AS quote_id, coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) AS quoted, f.base_cents AS base, f.distance_cents AS dist, f.time_cents AS tim, f.booking_fee_cents AS fee, f.min_adjust_cents AS adj, f.surge_milli AS surge, CASE WHEN l.outcome = 'completed' THEN coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) ELSE l.cancel_fee_cents END AS final, r.pickup_label AS pickup, r.dropoff_label AS dropoff FROM trips t JOIN trip_lifecycle l ON l.rider_id = t.rider_id AND l.trip_id = t.id JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id LEFT JOIN fare_quotes f ON f.rider_id = t.rider_id AND f.ride_id = t.request_id AND f.status = 'accepted' WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000) c",
+        "INSERT OR IGNORE INTO trip_evidence (rider_id, trip_id, kind, lat, lng, accuracy_m, age_ms, captured_at) SELECT l.rider_id, l.trip_id, 'ended', l.lat, l.lng, l.accuracy_m, :__now - l.updated_at, :__now FROM trip_locations l JOIN trips t ON t.rider_id = l.rider_id AND t.id = l.trip_id WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000 AND :__now - l.updated_at <= 60000",
         "DELETE FROM trip_locations WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000)",
         "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000)"
       ],
@@ -1100,22 +1108,23 @@
     },
     {
       "name": "ops_cancel_trip",
-      "description": "Ops: cancel any unfinished trip, including one in progress, with a mandatory note and an optional fee (0 up to the fare). Cannot act on trips where the caller is the rider or the driver. Audited with the ops actor. Deletes the trip's live location. Finalizes the immutable fare statement for the trip. Queues in-app and push notifications for the other party.",
+      "description": "Ops: cancel any unfinished trip, including one in progress, with a mandatory reason code (safety_incident, rider_request, driver_request, vehicle_issue, fraud_suspected, payment_issue, duplicate_request, other), a note and an optional fee (0 up to the fare). Cannot act on trips where the caller is the rider or the driver. Audited with the ops actor. Keeps a coarse position snapshot as dispute evidence for 30 days.",
       "operation": "batch",
       "statements": [
-        "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0",
-        "UPDATE trip_lifecycle SET outcome = 'ops_cancelled', cancelled_by_role = 'ops', cancel_code = 'ops_cancelled', cancel_note = substr(trim(coalesce(:note, '')), 1, 200), cancel_fee_cents = (SELECT MAX(0, MIN(coalesce(:fee_cents, 0), coalesce((SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0))) FROM trips t WHERE t.rider_id = trip_lifecycle.rider_id AND t.id = trip_lifecycle.trip_id), fee_policy = (SELECT 'ops_set' FROM trips t WHERE t.rider_id = trip_lifecycle.rider_id AND t.id = trip_lifecycle.trip_id), ended_at = :__now, updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_lifecycle.rider_id AND t.id = trip_lifecycle.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0)",
-        "INSERT INTO trip_lifecycle_events (rider_id, id, trip_id, event, actor_id, actor_role, reason_code, note, amount_cents, at) SELECT t.rider_id, :__uuid, t.id, 'cancelled', :__user_id, 'ops', 'ops_cancelled', substr(trim(coalesce(:note, '')), 1, 200), MAX(0, MIN(coalesce(:fee_cents, 0), coalesce((SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0))), :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0",
-        "INSERT OR IGNORE INTO trip_transitions (rider_id, id, trip_id, from_status, to_status, actor_type, actor_id, metadata, at) SELECT t.rider_id, t.id || ':' || 'cancelled', t.id, t.status, 'cancelled', 'system', :__user_id, json_object('source', 'ops', 'reason_code', 'ops_cancelled'), :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0",
-        "INSERT OR IGNORE INTO trip_events (rider_id, id, trip_id, type, status, at) SELECT t.rider_id, t.id || ':' || 'cancelled', t.id, 'status', 'cancelled', :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0",
-        "UPDATE ride_requests SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = ride_requests.rider_id AND t.request_id = ride_requests.id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0)",
-        "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE status IN ('offered', 'accepted') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_offers.rider_id AND t.request_id = dispatch_offers.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0)",
-        "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE status IN ('searching', 'matched') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_requests.rider_id AND t.request_id = dispatch_requests.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0)",
-        "INSERT OR IGNORE INTO notifications (user_id, id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id, created_at, read_at, push_status, push_attempts, push_next_at, push_error, email_status, email_attempts, email_next_at, email_error) SELECT c.recipient, c.nid, 'trip_cancelled', 'rider', c.trip_id, c.request_id, c.rider_id, c.link, c.params, 1, :__user_id, :__now, NULL, CASE WHEN coalesce(np.push, 1) = 1 THEN 'pending' ELSE 'skipped' END, 0, :__now, NULL, CASE WHEN 1 = 1 AND coalesce(np.email_fallback, 0) = 1 AND coalesce(np.push, 1) = 0 THEN 'pending' ELSE 'none' END, 0, :__now, NULL FROM (SELECT t.rider_id AS recipient, t.id || ':' || 'trip_cancelled' || ':' || 'rider' AS nid, t.id AS trip_id, t.request_id AS request_id, t.rider_id AS rider_id, '/trip/' || t.request_id AS link, json_object('by', 'ops', 'reason', (SELECT l.cancel_code FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id), 'fee_cents', (SELECT l.cancel_fee_cents FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id)) AS params FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0) c LEFT JOIN notification_prefs np ON np.user_id = c.recipient WHERE c.recipient IS NOT NULL AND c.recipient != :__user_id",
-        "INSERT OR IGNORE INTO notifications (user_id, id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id, created_at, read_at, push_status, push_attempts, push_next_at, push_error, email_status, email_attempts, email_next_at, email_error) SELECT c.recipient, c.nid, 'trip_cancelled', 'driver', c.trip_id, c.request_id, c.rider_id, c.link, c.params, 1, :__user_id, :__now, NULL, CASE WHEN coalesce(np.push, 1) = 1 THEN 'pending' ELSE 'skipped' END, 0, :__now, NULL, CASE WHEN 1 = 1 AND coalesce(np.email_fallback, 0) = 1 AND coalesce(np.push, 1) = 0 THEN 'pending' ELSE 'none' END, 0, :__now, NULL FROM (SELECT (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS recipient, t.id || ':' || 'trip_cancelled' || ':' || 'driver' AS nid, t.id AS trip_id, t.request_id AS request_id, t.rider_id AS rider_id, '/driver/trip/' || t.rider_id || '/' || t.request_id AS link, json_object('by', 'ops', 'reason', (SELECT l.cancel_code FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id), 'fee_cents', (SELECT l.cancel_fee_cents FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id)) AS params FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0) c LEFT JOIN notification_prefs np ON np.user_id = c.recipient WHERE c.recipient IS NOT NULL AND c.recipient != :__user_id",
-        "INSERT OR IGNORE INTO fare_statements (rider_id, trip_id, request_id, driver_user_id, receipt_no, basis, currency, quote_id, quoted_cents, base_cents, distance_cents, time_cents, booking_fee_cents, min_adjust_cents, surge_milli, final_cents, tax_rate_bp, tax_cents, commission_bp, platform_fee_cents, driver_payout_cents, policy_version, outcome, pickup_label, dropoff_label, finalized_at) SELECT c.rider_id, c.trip_id, c.request_id, c.driver_user_id, 'RCT-' || substr(:__uuid, 1, 8), c.basis, 'USD', c.quote_id, c.quoted, c.base, c.dist, c.tim, c.fee, c.adj, c.surge, c.final, 0, c.final - (c.final * 10000 + 5000) / 10000, 0, (c.final * 0 + 5000) / 10000, c.final - (c.final - (c.final * 10000 + 5000) / 10000) - (c.final * 0 + 5000) / 10000, 'v0-unconfigured', c.outcome, c.pickup, c.dropoff, :__now FROM (SELECT t.rider_id AS rider_id, t.id AS trip_id, t.request_id AS request_id, (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS driver_user_id, l.outcome AS outcome, CASE WHEN l.outcome = 'completed' THEN 'fare' WHEN l.outcome = 'rider_no_show' AND l.cancel_fee_cents > 0 THEN 'no_show_fee' WHEN l.cancel_fee_cents > 0 THEN 'cancellation_fee' ELSE 'none' END AS basis, f.id AS quote_id, coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) AS quoted, f.base_cents AS base, f.distance_cents AS dist, f.time_cents AS tim, f.booking_fee_cents AS fee, f.min_adjust_cents AS adj, f.surge_milli AS surge, CASE WHEN l.outcome = 'completed' THEN coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) ELSE l.cancel_fee_cents END AS final, r.pickup_label AS pickup, r.dropoff_label AS dropoff FROM trips t JOIN trip_lifecycle l ON l.rider_id = t.rider_id AND l.trip_id = t.id JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id LEFT JOIN fare_quotes f ON f.rider_id = t.rider_id AND f.ride_id = t.request_id AND f.status = 'accepted' WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0) c",
-        "DELETE FROM trip_locations WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0)",
-        "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0)"
+        "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other')",
+        "UPDATE trip_lifecycle SET outcome = 'ops_cancelled', cancelled_by_role = 'ops', cancel_code = :reason_code, cancel_note = substr(trim(coalesce(:note, '')), 1, 200), cancel_fee_cents = (SELECT MAX(0, MIN(coalesce(:fee_cents, 0), coalesce((SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0))) FROM trips t WHERE t.rider_id = trip_lifecycle.rider_id AND t.id = trip_lifecycle.trip_id), fee_policy = (SELECT 'ops_set' FROM trips t WHERE t.rider_id = trip_lifecycle.rider_id AND t.id = trip_lifecycle.trip_id), ended_at = :__now, updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_lifecycle.rider_id AND t.id = trip_lifecycle.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other'))",
+        "INSERT INTO trip_lifecycle_events (rider_id, id, trip_id, event, actor_id, actor_role, reason_code, note, amount_cents, at) SELECT t.rider_id, :__uuid, t.id, 'cancelled', :__user_id, 'ops', :reason_code, substr(trim(coalesce(:note, '')), 1, 200), MAX(0, MIN(coalesce(:fee_cents, 0), coalesce((SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0))), :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other')",
+        "INSERT OR IGNORE INTO trip_transitions (rider_id, id, trip_id, from_status, to_status, actor_type, actor_id, metadata, at) SELECT t.rider_id, t.id || ':' || 'cancelled', t.id, t.status, 'cancelled', 'system', :__user_id, json_object('source', 'ops', 'reason_code', :reason_code), :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other')",
+        "INSERT OR IGNORE INTO trip_events (rider_id, id, trip_id, type, status, at) SELECT t.rider_id, t.id || ':' || 'cancelled', t.id, 'status', 'cancelled', :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other')",
+        "UPDATE ride_requests SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = ride_requests.rider_id AND t.request_id = ride_requests.id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other'))",
+        "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE status IN ('offered', 'accepted') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_offers.rider_id AND t.request_id = dispatch_offers.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other'))",
+        "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE status IN ('searching', 'matched') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_requests.rider_id AND t.request_id = dispatch_requests.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other'))",
+        "INSERT OR IGNORE INTO notifications (user_id, id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id, created_at, read_at, push_status, push_attempts, push_next_at, push_error, email_status, email_attempts, email_next_at, email_error) SELECT c.recipient, c.nid, 'trip_cancelled', 'rider', c.trip_id, c.request_id, c.rider_id, c.link, c.params, 1, :__user_id, :__now, NULL, CASE WHEN coalesce(np.push, 1) = 1 THEN 'pending' ELSE 'skipped' END, 0, :__now, NULL, CASE WHEN 1 = 1 AND coalesce(np.email_fallback, 0) = 1 AND coalesce(np.push, 1) = 0 THEN 'pending' ELSE 'none' END, 0, :__now, NULL FROM (SELECT t.rider_id AS recipient, t.id || ':' || 'trip_cancelled' || ':' || 'rider' AS nid, t.id AS trip_id, t.request_id AS request_id, t.rider_id AS rider_id, '/trip/' || t.request_id AS link, json_object('by', 'ops', 'reason', (SELECT l.cancel_code FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id), 'fee_cents', (SELECT l.cancel_fee_cents FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id)) AS params FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other')) c LEFT JOIN notification_prefs np ON np.user_id = c.recipient WHERE c.recipient IS NOT NULL AND c.recipient != :__user_id",
+        "INSERT OR IGNORE INTO notifications (user_id, id, kind, role, trip_id, request_id, rider_id, link, params, critical, actor_id, created_at, read_at, push_status, push_attempts, push_next_at, push_error, email_status, email_attempts, email_next_at, email_error) SELECT c.recipient, c.nid, 'trip_cancelled', 'driver', c.trip_id, c.request_id, c.rider_id, c.link, c.params, 1, :__user_id, :__now, NULL, CASE WHEN coalesce(np.push, 1) = 1 THEN 'pending' ELSE 'skipped' END, 0, :__now, NULL, CASE WHEN 1 = 1 AND coalesce(np.email_fallback, 0) = 1 AND coalesce(np.push, 1) = 0 THEN 'pending' ELSE 'none' END, 0, :__now, NULL FROM (SELECT (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS recipient, t.id || ':' || 'trip_cancelled' || ':' || 'driver' AS nid, t.id AS trip_id, t.request_id AS request_id, t.rider_id AS rider_id, '/driver/trip/' || t.rider_id || '/' || t.request_id AS link, json_object('by', 'ops', 'reason', (SELECT l.cancel_code FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id), 'fee_cents', (SELECT l.cancel_fee_cents FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id)) AS params FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other')) c LEFT JOIN notification_prefs np ON np.user_id = c.recipient WHERE c.recipient IS NOT NULL AND c.recipient != :__user_id",
+        "INSERT OR IGNORE INTO fare_statements (rider_id, trip_id, request_id, driver_user_id, receipt_no, basis, currency, quote_id, quoted_cents, base_cents, distance_cents, time_cents, booking_fee_cents, min_adjust_cents, surge_milli, final_cents, tax_rate_bp, tax_cents, commission_bp, platform_fee_cents, driver_payout_cents, policy_version, outcome, pickup_label, dropoff_label, finalized_at) SELECT c.rider_id, c.trip_id, c.request_id, c.driver_user_id, 'RCT-' || substr(:__uuid, 1, 8), c.basis, 'USD', c.quote_id, c.quoted, c.base, c.dist, c.tim, c.fee, c.adj, c.surge, c.final, 0, c.final - (c.final * 10000 + 5000) / 10000, 0, (c.final * 0 + 5000) / 10000, c.final - (c.final - (c.final * 10000 + 5000) / 10000) - (c.final * 0 + 5000) / 10000, 'v0-unconfigured', c.outcome, c.pickup, c.dropoff, :__now FROM (SELECT t.rider_id AS rider_id, t.id AS trip_id, t.request_id AS request_id, (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS driver_user_id, l.outcome AS outcome, CASE WHEN l.outcome = 'completed' THEN 'fare' WHEN l.outcome = 'rider_no_show' AND l.cancel_fee_cents > 0 THEN 'no_show_fee' WHEN l.cancel_fee_cents > 0 THEN 'cancellation_fee' ELSE 'none' END AS basis, f.id AS quote_id, coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) AS quoted, f.base_cents AS base, f.distance_cents AS dist, f.time_cents AS tim, f.booking_fee_cents AS fee, f.min_adjust_cents AS adj, f.surge_milli AS surge, CASE WHEN l.outcome = 'completed' THEN coalesce(f.total_cents, (SELECT q.fare_cents FROM quotes q WHERE q.rider_id = t.rider_id AND q.request_id = t.request_id), 0) ELSE l.cancel_fee_cents END AS final, r.pickup_label AS pickup, r.dropoff_label AS dropoff FROM trips t JOIN trip_lifecycle l ON l.rider_id = t.rider_id AND l.trip_id = t.id JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id LEFT JOIN fare_quotes f ON f.rider_id = t.rider_id AND f.ride_id = t.request_id AND f.status = 'accepted' WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other')) c",
+        "INSERT OR IGNORE INTO trip_evidence (rider_id, trip_id, kind, lat, lng, accuracy_m, age_ms, captured_at) SELECT l.rider_id, l.trip_id, 'ended', l.lat, l.lng, l.accuracy_m, :__now - l.updated_at, :__now FROM trip_locations l JOIN trips t ON t.rider_id = l.rider_id AND t.id = l.trip_id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other') AND :__now - l.updated_at <= 60000",
+        "DELETE FROM trip_locations WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other'))",
+        "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('safety_incident', 'rider_request', 'driver_request', 'vehicle_issue', 'fraud_suspected', 'payment_issue', 'duplicate_request', 'other'))"
       ],
       "params": {
         "rider_id": {
@@ -1130,6 +1139,9 @@
         "fee_cents": {
           "type": "integer",
           "optional": true
+        },
+        "reason_code": {
+          "type": "string"
         }
       },
       "requires_auth": true,
@@ -1314,6 +1326,7 @@
       "description": "Driver: publish the assigned driver's position for a trip. Accepted only from the assigned driver while the trip is en_route or arrived (including in progress), never before they start driving or after the trip ends; at most one update per 3s (faster calls are dropped); implausible coordinates, accuracy (>500 m) or speed are dropped. Coordinates are rounded to 4 decimals (about 11 m) before storing. Only the latest position is kept, overwritten in place, and it is deleted when the trip ends; positions older than 24 hours are purged on every publish.",
       "operation": "batch",
       "statements": [
+        "DELETE FROM trip_evidence WHERE captured_at < :__now - 2592000000 AND :__user_id IS NOT NULL",
         "DELETE FROM trip_locations WHERE updated_at < :__now - 86400000 AND :__user_id IS NOT NULL",
         "INSERT INTO trip_locations (rider_id, trip_id, driver_id, lat, lng, accuracy_m, speed_mps, updated_at) SELECT t.rider_id, t.id, :__user_id, ROUND(:lat, 4), ROUND(:lng, 4), :accuracy_m, :speed_mps, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.status IN ('en_route', 'arrived') AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND :lat BETWEEN -90 AND 90 AND :lng BETWEEN -180 AND 180 AND coalesce(:accuracy_m, 0) BETWEEN 0 AND 500 AND coalesce(:speed_mps, 0) BETWEEN 0 AND 70 ON CONFLICT (rider_id, trip_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, accuracy_m = excluded.accuracy_m, speed_mps = excluded.speed_mps, driver_id = excluded.driver_id, updated_at = excluded.updated_at WHERE :__now - trip_locations.updated_at >= 3000"
       ],
@@ -1592,6 +1605,428 @@
       "operation": "query",
       "sql": "SELECT user_id, id, kind, 'push_failed' AS code, push_error AS detail, created_at FROM notifications WHERE push_status = 'failed' AND :__user_id IS NOT NULL UNION ALL SELECT user_id, id, kind, 'email_failed', email_error, created_at FROM notifications WHERE email_status = 'failed' UNION ALL SELECT user_id, id, kind, 'undelivered', CASE WHEN push_status IN ('pending', 'retry') THEN 'push ' || push_status ELSE 'email ' || email_status END, created_at FROM notifications WHERE created_at < :__now - 600000 AND (push_status IN ('pending', 'retry') OR (push_status NOT IN ('pending', 'retry') AND email_status IN ('pending', 'retry'))) ORDER BY created_at LIMIT :limit",
       "params": {
+        "limit": {
+          "type": "integer",
+          "default": 100,
+          "max": 500,
+          "optional": true
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_search_trips",
+      "description": "Ops: search trips by exact trip id, ride id, receipt number, rider id or driver id (no partial matching), optionally by status; newest first. Redacted: ids, status, outcome, vehicle class, amounts, dispatch state and whether a dispute is open, but no names, addresses, plates or coordinates. Excludes trips the caller rode or drove.",
+      "operation": "query",
+      "sql": "SELECT t.id AS trip_id, t.request_id, t.rider_id, (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS driver_user_id, CASE WHEN t.status = 'arrived' AND l.started_at IS NOT NULL THEN 'in_progress' ELSE t.status END AS phase, l.outcome, r.vehicle_class, t.created_at, t.updated_at, (SELECT s.final_cents FROM fare_statements s WHERE s.rider_id = t.rider_id AND s.trip_id = t.id) AS final_cents, (SELECT d.status FROM dispatch_requests d WHERE d.rider_id = t.rider_id AND d.request_id = t.request_id) AS dispatch_status, EXISTS (SELECT 1 FROM trip_disputes p WHERE p.rider_id = t.rider_id AND p.trip_id = t.id AND p.status = 'open') AS dispute_open FROM trips t JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id LEFT JOIN trip_lifecycle l ON l.rider_id = t.rider_id AND l.trip_id = t.id WHERE t.rider_id != :__user_id AND coalesce((SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id), '') != :__user_id AND (:status IS NULL OR t.status = :status) AND (:q IS NULL OR t.id = :q OR t.request_id = :q OR t.rider_id = :q OR (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) = :q OR EXISTS (SELECT 1 FROM fare_statements s WHERE s.rider_id = t.rider_id AND s.trip_id = t.id AND s.receipt_no = :q)) ORDER BY t.updated_at DESC LIMIT :limit",
+      "params": {
+        "q": {
+          "type": "string",
+          "optional": true
+        },
+        "status": {
+          "type": "string",
+          "optional": true
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50,
+          "max": 200,
+          "optional": true
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_get_trip",
+      "description": "Ops: one trip's state for support: phase, who ended it and why, fees, assignment and dispatch status, amounts, dispute and refund-request counts. Redacted (no names, addresses, plates or coordinates).",
+      "operation": "query",
+      "sql": "SELECT t.id AS trip_id, t.request_id, t.rider_id, (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS driver_user_id, CASE WHEN t.status = 'arrived' AND l.started_at IS NOT NULL THEN 'in_progress' ELSE t.status END AS phase, t.status, l.started_at, l.ended_at, l.outcome, l.cancelled_by_role, l.cancel_code, l.cancel_fee_cents, l.fee_policy, r.vehicle_class, r.booking_type, (SELECT a.status FROM assignments a WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id) AS assignment_status, (SELECT d.status FROM dispatch_requests d WHERE d.rider_id = t.rider_id AND d.request_id = t.request_id) AS dispatch_status, (SELECT d.attempts FROM dispatch_requests d WHERE d.rider_id = t.rider_id AND d.request_id = t.request_id) AS dispatch_attempts, (SELECT s.final_cents FROM fare_statements s WHERE s.rider_id = t.rider_id AND s.trip_id = t.id) AS final_cents, (SELECT s.receipt_no FROM fare_statements s WHERE s.rider_id = t.rider_id AND s.trip_id = t.id) AS receipt_no, coalesce((SELECT SUM(x.amount_cents) FROM fare_adjustments x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id), 0) AS credits_cents, (SELECT COUNT(*) FROM trip_disputes p WHERE p.rider_id = t.rider_id AND p.trip_id = t.id) AS disputes, (SELECT COUNT(*) FROM trip_disputes p WHERE p.rider_id = t.rider_id AND p.trip_id = t.id AND p.status = 'open') AS disputes_open, (SELECT COUNT(*) FROM refund_requests f WHERE f.rider_id = t.rider_id AND f.trip_id = t.id) AS refund_requests, t.created_at, t.updated_at FROM trips t JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id LEFT JOIN trip_lifecycle l ON l.rider_id = t.rider_id AND l.trip_id = t.id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND coalesce((SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id), '') != :__user_id",
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "trip_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_get_trip_offers",
+      "description": "Ops: the dispatch history for a ride, oldest first: each driver offered, the outcome (offered, accepted, declined, expired, cancelled, completed) and timings. Redacted to driver ids; no names or locations.",
+      "operation": "query",
+      "sql": "SELECT o.attempt, o.driver_id AS driver_user_id, o.status, o.distance_km2, o.offered_at, o.expires_at, o.responded_at FROM dispatch_offers o WHERE o.rider_id = :rider_id AND o.request_id = :request_id AND o.rider_id != :__user_id AND o.driver_id != :__user_id ORDER BY o.attempt",
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_get_trip_evidence",
+      "description": "Ops: location evidence for a trip without coordinates: for each snapshot (driver arrived, trip started, trip ended) when it was taken, its accuracy, and how close the driver was to the pickup (or the drop-off at the end of a completed trip): within 150 m, 500 m, 2 km, farther, or unknown. Exact coordinates need ops_pii and a logged reason.",
+      "operation": "query",
+      "sql": "SELECT e.kind, e.captured_at, e.age_ms, e.accuracy_m, CASE WHEN (CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END) IS NULL THEN 'unknown' WHEN (((((e.lat) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END))) * ((e.lat) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END))) + ((e.lng) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lng ELSE r.pickup_lng END))) * ((e.lng) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lng ELSE r.pickup_lng END))) * (1 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 2 + ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 24 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 720) * (1 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 2 + ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 24 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 720)) * 12364.5)) <= 0.0225 THEN 'within_150m' WHEN (((((e.lat) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END))) * ((e.lat) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END))) + ((e.lng) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lng ELSE r.pickup_lng END))) * ((e.lng) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lng ELSE r.pickup_lng END))) * (1 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 2 + ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 24 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 720) * (1 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 2 + ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 24 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 720)) * 12364.5)) <= 0.25 THEN 'within_500m' WHEN (((((e.lat) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END))) * ((e.lat) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END))) + ((e.lng) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lng ELSE r.pickup_lng END))) * ((e.lng) - ((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lng ELSE r.pickup_lng END))) * (1 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 2 + ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 24 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 720) * (1 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 2 + ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 24 - ((((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295) * (((CASE WHEN e.kind = 'ended' AND t.status = 'completed' THEN r.dropoff_lat ELSE r.pickup_lat END)) * 0.017453292519943295)) / 720)) * 12364.5)) <= 4 THEN 'within_2km' ELSE 'farther' END AS proximity FROM trip_evidence e JOIN trips t ON t.rider_id = e.rider_id AND t.id = e.trip_id JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id WHERE e.rider_id = :rider_id AND e.trip_id = :trip_id AND t.rider_id != :__user_id AND coalesce((SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id), '') != :__user_id ORDER BY e.captured_at",
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "trip_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_log_access",
+      "description": "Ops (ops_pii): record why you need to see personal data, before you see it. scope trip_pii (names, addresses, plate), evidence (exact coordinates) or driver_pii (licence details); reason_code is one of dispute, safety_incident, support_ticket, fraud_check, legal_request. The matching read action returns data only for 10 minutes after this. Every access is listed in the audit log.",
+      "operation": "execute",
+      "sql": "INSERT INTO ops_access_log (id, actor_id, scope, rider_id, trip_id, driver_user_id, reason_code, at) SELECT :__uuid, :__user_id, :scope, :rider_id, :trip_id, :driver_user_id, :reason_code, :__now WHERE :scope IN ('trip_pii', 'evidence', 'driver_pii') AND :reason_code IN ('dispute', 'safety_incident', 'support_ticket', 'fraud_check', 'legal_request') AND ((:scope = 'driver_pii' AND :driver_user_id IS NOT NULL AND :driver_user_id != :__user_id) OR (:scope != 'driver_pii' AND :rider_id IS NOT NULL AND :trip_id IS NOT NULL AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND coalesce((SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id), '') != :__user_id)))",
+      "params": {
+        "scope": {
+          "type": "string"
+        },
+        "rider_id": {
+          "type": "string",
+          "optional": true
+        },
+        "trip_id": {
+          "type": "string",
+          "optional": true
+        },
+        "driver_user_id": {
+          "type": "string",
+          "optional": true
+        },
+        "reason_code": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops_pii"
+        ]
+      }
+    },
+    {
+      "name": "ops_get_trip_pii",
+      "description": "Ops (ops_pii): the personal details for a trip: pickup and drop-off addresses, rider's name, driver's name and plate. Returns nothing unless the caller logged a trip_pii access for this trip in the last 10 minutes.",
+      "operation": "query",
+      "sql": "SELECT t.id AS trip_id, r.pickup_label, r.dropoff_label, (SELECT p.display_name FROM rider_profiles p WHERE p.rider_id = t.rider_id) AS rider_name, (SELECT a.full_name FROM driver_applications a WHERE a.user_id = (SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id)) AS driver_name, (SELECT v.plate FROM assignments s JOIN vehicles v ON v.rider_id = s.rider_id AND v.id = s.vehicle_id WHERE s.rider_id = t.rider_id AND s.id = t.assignment_id) AS plate FROM trips t JOIN ride_requests r ON r.rider_id = t.rider_id AND r.id = t.request_id WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND coalesce((SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id), '') != :__user_id AND EXISTS (SELECT 1 FROM ops_access_log g WHERE g.actor_id = :__user_id AND g.scope = 'trip_pii' AND g.rider_id = :rider_id AND g.trip_id = :trip_id AND g.at > :__now - 600000)",
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "trip_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops_pii"
+        ]
+      }
+    },
+    {
+      "name": "ops_get_trip_evidence_pii",
+      "description": "Ops (ops_pii): the exact coordinates of a trip's evidence snapshots. Returns nothing unless the caller logged an evidence access for this trip in the last 10 minutes.",
+      "operation": "query",
+      "sql": "SELECT e.kind, e.lat, e.lng, e.accuracy_m, e.captured_at FROM trip_evidence e JOIN trips t ON t.rider_id = e.rider_id AND t.id = e.trip_id WHERE e.rider_id = :rider_id AND e.trip_id = :trip_id AND t.rider_id != :__user_id AND coalesce((SELECT d.user_id FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id), '') != :__user_id AND EXISTS (SELECT 1 FROM ops_access_log g WHERE g.actor_id = :__user_id AND g.scope = 'evidence' AND g.rider_id = :rider_id AND g.trip_id = :trip_id AND g.at > :__now - 600000) ORDER BY e.captured_at",
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "trip_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops_pii"
+        ]
+      }
+    },
+    {
+      "name": "ops_suspend_driver",
+      "description": "Ops: suspend an approved driver with a reason code (safety, fraud_suspected, document_expired, repeated_cancellations, complaint, other) and a note. Takes them off dispatch, withdraws any open offer, and blocks going available. A trip already in progress is not touched; cancel it separately. Audited in the driver review log with actor, time, code and note. Cannot suspend yourself.",
+      "operation": "batch",
+      "statements": [
+        "INSERT INTO driver_review_log (id, user_id, vehicle_id, from_status, to_status, reason, actor_id, actor_role, at) SELECT :__uuid, a.user_id, NULL, a.status, 'suspended', :reason_code || ': ' || substr(trim(:note), 1, 200), :__user_id, 'ops', :__now FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND a.status = 'approved' AND :reason_code IN ('safety', 'fraud_suspected', 'document_expired', 'repeated_cancellations', 'complaint', 'other') AND length(trim(coalesce(:note, ''))) > 0",
+        "UPDATE driver_availability SET available = 0, updated_at = :__now WHERE user_id = :driver_user_id AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND a.status = 'approved' AND :reason_code IN ('safety', 'fraud_suspected', 'document_expired', 'repeated_cancellations', 'complaint', 'other') AND length(trim(coalesce(:note, ''))) > 0)",
+        "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE driver_id = :driver_user_id AND status = 'offered' AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND a.status = 'approved' AND :reason_code IN ('safety', 'fraud_suspected', 'document_expired', 'repeated_cancellations', 'complaint', 'other') AND length(trim(coalesce(:note, ''))) > 0)",
+        "UPDATE driver_applications SET status = 'suspended', status_reason = :reason_code || ': ' || substr(trim(:note), 1, 200), reviewed_at = :__now, reviewed_by = :__user_id, updated_at = :__now WHERE user_id = :driver_user_id AND user_id != :__user_id AND status = 'approved' AND :reason_code IN ('safety', 'fraud_suspected', 'document_expired', 'repeated_cancellations', 'complaint', 'other') AND length(trim(coalesce(:note, ''))) > 0"
+      ],
+      "params": {
+        "driver_user_id": {
+          "type": "string"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_reinstate_driver",
+      "description": "Ops: lift a suspension with a reason code (review_complete, documents_renewed, error, other) and a note. The driver must go available again themselves. Audited in the driver review log. Cannot reinstate yourself.",
+      "operation": "batch",
+      "statements": [
+        "INSERT INTO driver_review_log (id, user_id, vehicle_id, from_status, to_status, reason, actor_id, actor_role, at) SELECT :__uuid, a.user_id, NULL, a.status, 'approved', :reason_code || ': ' || substr(trim(:note), 1, 200), :__user_id, 'ops', :__now FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND a.status = 'suspended' AND :reason_code IN ('review_complete', 'documents_renewed', 'error', 'other') AND length(trim(coalesce(:note, ''))) > 0",
+        "UPDATE driver_applications SET status = 'approved', status_reason = NULL, reviewed_at = :__now, reviewed_by = :__user_id, updated_at = :__now WHERE user_id = :driver_user_id AND user_id != :__user_id AND status = 'suspended' AND :reason_code IN ('review_complete', 'documents_renewed', 'error', 'other') AND length(trim(coalesce(:note, ''))) > 0"
+      ],
+      "params": {
+        "driver_user_id": {
+          "type": "string"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_request_refund",
+      "description": "Ops: request a refund for a finished trip with a reason code (overcharged, service_failure, duplicate_charge, cancel_fee_dispute, other) and a note. The amount can't exceed what is still unrefunded after credits and other open or approved requests. This only records the request for a second person to decide; no money moves, because payments are not enabled (docs/adr/0001). request_key makes retries safe.",
+      "operation": "execute",
+      "sql": "INSERT OR IGNORE INTO refund_requests (rider_id, id, trip_id, amount_cents, reason_code, note, status, requested_by, requested_at) SELECT s.rider_id, :request_key, s.trip_id, :amount_cents, :reason_code, substr(trim(:note), 1, 200), 'requested', :__user_id, :__now FROM fare_statements s WHERE s.rider_id = :rider_id AND s.trip_id = :trip_id AND s.rider_id != :__user_id AND coalesce(s.driver_user_id, '') != :__user_id AND length(trim(coalesce(:request_key, ''))) > 0 AND length(trim(coalesce(:note, ''))) > 0 AND :reason_code IN ('overcharged', 'service_failure', 'duplicate_charge', 'cancel_fee_dispute', 'other') AND :amount_cents > 0 AND :amount_cents <= s.final_cents - coalesce((SELECT SUM(x.amount_cents) FROM fare_adjustments x WHERE x.rider_id = s.rider_id AND x.trip_id = s.trip_id), 0) - coalesce((SELECT SUM(f.amount_cents) FROM refund_requests f WHERE f.rider_id = s.rider_id AND f.trip_id = s.trip_id AND f.status IN ('requested', 'approved')), 0)",
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "trip_id": {
+          "type": "string"
+        },
+        "request_key": {
+          "type": "string"
+        },
+        "amount_cents": {
+          "type": "integer"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_list_refund_requests",
+      "description": "Ops: refund requests by status (default requested), oldest first",
+      "operation": "query",
+      "sql": "SELECT f.rider_id, f.id AS request_key, f.trip_id, f.amount_cents, f.reason_code, f.note, f.status, f.requested_by, f.requested_at, f.decided_by, f.decided_at, f.decision_note FROM refund_requests f WHERE f.rider_id != :__user_id AND f.status = coalesce(:status, 'requested') ORDER BY f.requested_at LIMIT :limit",
+      "params": {
+        "status": {
+          "type": "string",
+          "optional": true
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50,
+          "max": 200,
+          "optional": true
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_decide_refund",
+      "description": "Ops: approve or reject a refund request with a note. A different person from the requester must decide (four-eyes), and not someone who rode or drove the trip. Approval is recorded as the decision only; it moves no money while payments are not enabled.",
+      "operation": "execute",
+      "sql": "UPDATE refund_requests SET status = :decision, decided_by = :__user_id, decided_at = :__now, decision_note = substr(trim(:note), 1, 200) WHERE rider_id = :rider_id AND id = :request_key AND status = 'requested' AND requested_by != :__user_id AND rider_id != :__user_id AND :decision IN ('approved', 'rejected') AND length(trim(coalesce(:note, ''))) > 0 AND NOT EXISTS (SELECT 1 FROM fare_statements s WHERE s.rider_id = refund_requests.rider_id AND s.trip_id = refund_requests.trip_id AND s.driver_user_id = :__user_id)",
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "request_key": {
+          "type": "string"
+        },
+        "decision": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_escalate",
+      "description": "Ops: escalate a trip or a driver to a lead, safety or legal reviewer with a reason code (safety, legal_request, fraud, abuse, regulator_or_press, other) and a note. Give a trip (rider_id and trip_id), a driver (driver_user_id), or both. request_key makes retries safe.",
+      "operation": "execute",
+      "sql": "INSERT OR IGNORE INTO ops_escalations (id, rider_id, trip_id, driver_user_id, level, reason_code, note, status, opened_by, opened_at) SELECT :request_key, :rider_id, :trip_id, :driver_user_id, :level, :reason_code, substr(trim(:note), 1, 200), 'open', :__user_id, :__now WHERE length(trim(coalesce(:request_key, ''))) > 0 AND length(trim(coalesce(:note, ''))) > 0 AND :level IN ('lead', 'safety', 'legal') AND :reason_code IN ('safety', 'legal_request', 'fraud', 'abuse', 'regulator_or_press', 'other') AND ((:rider_id IS NOT NULL AND :trip_id IS NOT NULL AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id)) OR (:rider_id IS NULL AND :trip_id IS NULL AND :driver_user_id IS NOT NULL AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :driver_user_id)))",
+      "params": {
+        "request_key": {
+          "type": "string"
+        },
+        "rider_id": {
+          "type": "string",
+          "optional": true
+        },
+        "trip_id": {
+          "type": "string",
+          "optional": true
+        },
+        "driver_user_id": {
+          "type": "string",
+          "optional": true
+        },
+        "level": {
+          "type": "string"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_list_escalations",
+      "description": "Ops: escalations by status (default open), oldest first",
+      "operation": "query",
+      "sql": "SELECT id, rider_id, trip_id, driver_user_id, level, reason_code, note, status, opened_by, opened_at, resolved_by, resolved_at, resolution_note FROM ops_escalations WHERE status = coalesce(:status, 'open') AND :__user_id IS NOT NULL ORDER BY opened_at LIMIT :limit",
+      "params": {
+        "status": {
+          "type": "string",
+          "optional": true
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50,
+          "max": 200,
+          "optional": true
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_resolve_escalation",
+      "description": "Ops: close an open escalation with a resolution note. Someone other than the person who opened it must resolve it.",
+      "operation": "execute",
+      "sql": "UPDATE ops_escalations SET status = 'resolved', resolved_by = :__user_id, resolved_at = :__now, resolution_note = substr(trim((:note)), 1, 200) WHERE id = :request_key AND status = 'open' AND opened_by != :__user_id AND length(trim(coalesce(:note, ''))) > 0",
+      "params": {
+        "request_key": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "ops_list_audit",
+      "description": "Ops: every staff action in one list, newest first, each with the actor, time, target, reason code and note: trip cancellations, fee waivers, dispute decisions, credits, driver approvals/rejections/suspensions/reinstatements, vehicle decisions, refund requests and decisions, escalations and their resolution, and every personal-data access. Filter by trip or actor.",
+      "operation": "query",
+      "sql": "SELECT at, action, actor_id, rider_id, trip_id, driver_user_id, reason_code, note, amount_cents FROM (SELECT e.at AS at, CASE e.event WHEN 'cancelled' THEN 'trip_cancelled' WHEN 'fee_waived' THEN 'fee_waived' ELSE e.event END AS action, e.actor_id AS actor_id, e.rider_id AS rider_id, e.trip_id AS trip_id, NULL AS driver_user_id, e.reason_code AS reason_code, e.note AS note, e.amount_cents AS amount_cents FROM trip_lifecycle_events e WHERE e.actor_role = 'ops' UNION ALL SELECT x.created_at, 'credit', x.actor_id, x.rider_id, x.trip_id, NULL, x.reason_code, x.note, x.amount_cents FROM fare_adjustments x WHERE x.actor_id IN (SELECT actor_id FROM driver_review_log UNION SELECT actor_id FROM trip_lifecycle_events WHERE actor_role = 'ops' UNION SELECT requested_by FROM refund_requests UNION SELECT opened_by FROM ops_escalations UNION SELECT actor_id FROM ops_access_log UNION SELECT :__user_id) UNION ALL SELECT g.at, 'driver_' || g.to_status, g.actor_id, NULL, NULL, g.user_id, g.vehicle_id, g.reason, NULL FROM driver_review_log g WHERE g.actor_role = 'ops' UNION ALL SELECT f.requested_at, 'refund_requested', f.requested_by, f.rider_id, f.trip_id, NULL, f.reason_code, f.note, f.amount_cents FROM refund_requests f UNION ALL SELECT f.decided_at, 'refund_' || f.status, f.decided_by, f.rider_id, f.trip_id, NULL, NULL, f.decision_note, f.amount_cents FROM refund_requests f WHERE f.decided_at IS NOT NULL UNION ALL SELECT s.opened_at, 'escalated_' || s.level, s.opened_by, s.rider_id, s.trip_id, s.driver_user_id, s.reason_code, s.note, NULL FROM ops_escalations s UNION ALL SELECT s.resolved_at, 'escalation_resolved', s.resolved_by, s.rider_id, s.trip_id, s.driver_user_id, NULL, s.resolution_note, NULL FROM ops_escalations s WHERE s.resolved_at IS NOT NULL UNION ALL SELECT a.at, 'pii_access_' || a.scope, a.actor_id, a.rider_id, a.trip_id, a.driver_user_id, a.reason_code, NULL, NULL FROM ops_access_log a) WHERE (:trip_id IS NULL OR trip_id = :trip_id) AND (:actor IS NULL OR actor_id = :actor) ORDER BY at DESC LIMIT :limit",
+      "params": {
+        "trip_id": {
+          "type": "string",
+          "optional": true
+        },
+        "actor": {
+          "type": "string",
+          "optional": true
+        },
         "limit": {
           "type": "integer",
           "default": 100,

@@ -477,6 +477,8 @@ describe('driver onboarding, approval and dispatch eligibility', () => {
   const vehicleStatus = (id = 'v1') => (db.prepare('SELECT status FROM driver_vehicles WHERE id = ?').get(id) as { status: string }).status
   const review = (decision: string, reason?: string, actor = 'ops-1', now = NOW) =>
     as(actor, 'review_driver_application', { driver_user_id: 'drv', decision, reason }, now)
+  const suspend = (note = 'complaint', actor = 'ops-1', code = 'complaint', id = 'drv') => as(actor, 'ops_suspend_driver', { driver_user_id: id, reason_code: code, note })
+  const reinstate = (note = 'cleared', actor = 'ops-1', code = 'review_complete', id = 'drv') => as(actor, 'ops_reinstate_driver', { driver_user_id: id, reason_code: code, note })
   const submitted = () => {
     as('drv', 'save_driver_application', application)
     as('drv', 'save_driver_vehicle', vehicle)
@@ -490,8 +492,9 @@ describe('driver onboarding, approval and dispatch eligibility', () => {
   const goAvailable = (now = NOW) => as('drv', 'set_driver_availability', { available: 1, vehicle_id: 'v1' }, now)
 
   it('ops tools are gated by the ops app role; applicant tools are not', () => {
-    const opsTools = ['list_driver_applications', 'get_driver_application_detail', 'list_driver_vehicles_for_review', 'list_driver_review_log', 'review_driver_application', 'review_driver_vehicle', 'list_dispatchable_drivers']
+    const opsTools = ['list_driver_applications', 'list_driver_vehicles_for_review', 'list_driver_review_log', 'review_driver_application', 'review_driver_vehicle', 'list_dispatchable_drivers']
     for (const name of opsTools) expect(tool(name), name).toMatchObject({ auth: { required: true, app_roles: ['ops'] } })
+    expect(tool('get_driver_application_detail')).toMatchObject({ auth: { required: true, app_roles: ['ops_pii'] } })
     for (const name of ['save_driver_application', 'submit_driver_application', 'save_driver_vehicle', 'set_driver_availability', 'get_my_driver_application'])
       expect((tool(name) as unknown as { auth?: unknown }).auth, name).toBeUndefined()
   })
@@ -531,12 +534,16 @@ describe('driver onboarding, approval and dispatch eligibility', () => {
     expect(as('other', 'list_my_driver_review_log')).toEqual([])
   })
 
-  it('ops list masks the licence number; detail shows it', () => {
+  it('the ops list redacts personal details; the full record needs a logged reason first', () => {
     submitted()
     const [row] = as('ops-1', 'list_driver_applications', { status: 'submitted' }) as Record<string, unknown>[]
-    expect(row).toMatchObject({ user_id: 'drv', licence_last4: '4567', vehicle_count: 1 })
-    expect(JSON.stringify(row)).not.toContain('D1234567')
-    expect(as('ops-1', 'get_driver_application_detail', { driver_user_id: 'drv' })).toMatchObject([{ licence_number: 'D1234567' }])
+    expect(row).toMatchObject({ user_id: 'drv', initial: 'D.', phone_masked: '***00', licence_last4: '4567', vehicle_count: 1 })
+    expect(JSON.stringify(row)).not.toMatch(/D1234567|Dana Driver|555-0100/)
+    expect(as('pii-1', 'get_driver_application_detail', { driver_user_id: 'drv' })).toEqual([]) // no logged reason, nothing
+    as('pii-1', 'ops_log_access', { scope: 'driver_pii', driver_user_id: 'drv', reason_code: 'support_ticket' })
+    expect(as('pii-1', 'get_driver_application_detail', { driver_user_id: 'drv' })).toMatchObject([{ licence_number: 'D1234567', full_name: 'Dana Driver', phone: '555-0100' }])
+    expect(as('pii-2', 'get_driver_application_detail', { driver_user_id: 'drv' })).toEqual([]) // someone else's reason does not count
+    expect(as('pii-1', 'get_driver_application_detail', { driver_user_id: 'drv' }, NOW + 10 * 60_000 + 1)).toEqual([]) // expires after 10 minutes
     expect(as('ops-1', 'list_driver_applications', { status: 'approved' })).toEqual([])
   })
 
@@ -571,17 +578,22 @@ describe('driver onboarding, approval and dispatch eligibility', () => {
     review('approved') // still a draft
     expect(appStatus()).toBe('draft')
     submitted()
-    review('suspended', 'too early') // submitted cannot be suspended
+    suspend('too early') // a submitted application cannot be suspended
+    review('suspended', 'too early') // and the review action no longer suspends at all
     expect(appStatus()).toBe('submitted')
     review('approved')
     review('rejected', 'late') // approved cannot be rejected
     expect(appStatus()).toBe('approved')
     review('banana', 'x')
     expect(appStatus()).toBe('approved')
-    review('suspended', 'complaint')
+    review('suspended', 'complaint') // not a review decision any more
+    expect(appStatus()).toBe('approved')
+    suspend('complaint')
     expect(appStatus()).toBe('suspended')
-    review('approved')
-    expect(appStatus()).toBe('approved') // reinstated
+    review('approved') // the review action cannot reinstate either
+    expect(appStatus()).toBe('suspended')
+    reinstate()
+    expect(appStatus()).toBe('approved')
   })
 
   it('an ops user cannot review their own application', () => {
@@ -618,12 +630,12 @@ describe('driver onboarding, approval and dispatch eligibility', () => {
     approved()
     goAvailable()
     expect(dispatchable()).toHaveLength(1)
-    review('suspended', 'safety report')
+    suspend('safety report', 'ops-1', 'safety')
     expect(dispatchable()).toEqual([])
     expect(as('drv', 'get_my_driver_availability')).toMatchObject([{ available: 0 }])
     goAvailable() // suspended drivers cannot return themselves
     expect(as('drv', 'get_my_driver_availability')).toMatchObject([{ available: 0 }])
-    review('approved') // reinstated, but must opt in again
+    reinstate() // reinstated, but must opt in again
     expect(dispatchable()).toEqual([])
     goAvailable()
     expect(dispatchable()).toHaveLength(1)
@@ -802,7 +814,7 @@ describe('driver availability and dispatch matching', () => {
 
   it('never offers to unapproved or suspended drivers', () => {
     makeDriver('susp')
-    as('ops', 'review_driver_application', { driver_user_id: 'susp', decision: 'suspended', reason: 'complaint' })
+    as('ops', 'ops_suspend_driver', { driver_user_id: 'susp', reason_code: 'complaint', note: 'complaint' })
     as('applicant', 'save_driver_application', { full_name: 'X', eligibility_confirmed: 1 })
     request('rider-1')
     tick('rider-1')
@@ -921,7 +933,7 @@ describe('driver availability and dispatch matching', () => {
     makeDriver('d2', { at: near(1) })
     tick('rider-1')
     expect(offeredTo()).toBe('d2')
-    as('ops', 'review_driver_application', { driver_user_id: 'd2', decision: 'suspended', reason: 'safety' })
+    as('ops', 'ops_suspend_driver', { driver_user_id: 'd2', reason_code: 'safety', note: 'safety' })
     accept('d2')
     expect(count(db, 'assignments')).toBe(0)
     expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'open' })
@@ -1380,9 +1392,9 @@ describe('authoritative trip lifecycle and permissions', () => {
     for (const name of ['advance_trip', 'start_trip', 'driver_cancel_trip', 'report_rider_no_show', 'report_driver_no_show', 'cancel_ride', 'open_dispute'])
       expect((tool(name) as unknown as { auth?: unknown }).auth, name).toBeUndefined()
     matched('r1', 'ops-rider')
-    as('ops-rider', 'ops_cancel_trip', { ...trip('r1:trip', 'ops-rider'), note: 'x' }) // the rider is the ops user
+    as('ops-rider', 'ops_cancel_trip', { ...trip('r1:trip', 'ops-rider'), reason_code: 'other', note: 'x' }) // the rider is the ops user
     expect(status()).toBe('scheduled')
-    as('d1', 'ops_cancel_trip', { ...trip('r1:trip', 'ops-rider'), note: 'x' }) // the driver is the ops user
+    as('d1', 'ops_cancel_trip', { ...trip('r1:trip', 'ops-rider'), reason_code: 'other', note: 'x' }) // the driver is the ops user
     expect(status()).toBe('scheduled')
     expect(as('d1', 'ops_get_trip_timeline', trip('r1:trip', 'ops-rider'))).toEqual([])
     expect(as('ops-rider', 'ops_get_trip_timeline', trip('r1:trip', 'ops-rider'))).toEqual([])
@@ -1511,22 +1523,22 @@ describe('authoritative trip lifecycle and permissions', () => {
   describe('operations', () => {
     it('cancels a trip in progress with a mandatory note and a capped fee', () => {
       matched(); toArrived(); start()
-      as('ops', 'ops_cancel_trip', { ...trip(), note: '  ' }, NOW + 1) // blank note
+      as('ops', 'ops_cancel_trip', { ...trip(), reason_code: 'safety_incident', note: '  ' }, NOW + 1) // blank note
       expect(status()).toBe('arrived')
-      as('ops', 'ops_cancel_trip', { ...trip(), note: 'safety incident', fee_cents: 99_999 }, NOW + 2)
+      as('ops', 'ops_cancel_trip', { ...trip(), reason_code: 'safety_incident', note: 'safety incident', fee_cents: 99_999 }, NOW + 2)
       expect(status()).toBe('cancelled')
       expect(life()).toMatchObject({ outcome: 'ops_cancelled', cancelled_by_role: 'ops', cancel_fee_cents: 1500, fee_policy: 'ops_set' })
-      expect(events().at(-1)).toEqual({ event: 'cancelled', actor_role: 'ops', reason_code: 'ops_cancelled', note: 'safety incident', amount_cents: 1500 })
+      expect(events().at(-1)).toEqual({ event: 'cancelled', actor_role: 'ops', reason_code: 'safety_incident', note: 'safety incident', amount_cents: 1500 })
       expect(db.prepare('SELECT status FROM dispatch_offers').get()).toEqual({ status: 'cancelled' })
     })
 
     it('does not touch finished trips and never charges a negative fee', () => {
       matched(); toArrived(); start(); advance('completed')
-      as('ops', 'ops_cancel_trip', { ...trip(), note: 'late' })
+      as('ops', 'ops_cancel_trip', { ...trip(), reason_code: 'other', note: 'late' })
       expect(status()).toBe('completed')
       db = new DatabaseSync(':memory:'); migrate(db, new Set())
       matched()
-      as('ops', 'ops_cancel_trip', { ...trip(), note: 'dup', fee_cents: -50 })
+      as('ops', 'ops_cancel_trip', { ...trip(), reason_code: 'duplicate_request', note: 'dup', fee_cents: -50 })
       expect(life()).toMatchObject({ cancel_fee_cents: 0 })
     })
 
@@ -1760,7 +1772,7 @@ describe('live driver location', () => {
     ['rider cancellation', () => as('rider-1', 'cancel_ride', { request_id: 'r1' })],
     ['driver cancellation', () => as('d1', 'driver_cancel_trip', { ...trip, reason_code: 'safety' })],
     ['rider no-show', () => { drive('arrived'); as('d1', 'report_rider_no_show', trip, NOW + 6 * 60_000) }],
-    ['ops cancellation', () => as('ops', 'ops_cancel_trip', { ...trip, note: 'incident' })],
+    ['ops cancellation', () => as('ops', 'ops_cancel_trip', { ...trip, reason_code: 'safety_incident', note: 'incident' })],
   ])('deletes the live location on %s', (_name, end) => {
     matched(); drive('en_route'); publish('d1', NOW)
     expect(stored()).toHaveLength(1)
@@ -1890,7 +1902,7 @@ describe('fare statements, adjustments, receipts and reconciliation', () => {
       ['driver cancels', () => as('d1', 'driver_cancel_trip', { ...tripOf(), reason_code: 'safety' }), 'none', 0, 'driver_cancelled'],
       ['rider does not show', () => { step('en_route'); step('arrived'); as('d1', 'report_rider_no_show', tripOf(), NOW + 6 * MIN) }, 'no_show_fee', 800, 'rider_no_show'],
       ['driver does not show', () => as('rider-1', 'report_driver_no_show', { request_id: 'r1' }, NOW + 16 * MIN), 'none', 0, 'driver_no_show'],
-      ['ops cancels with a fee', () => as('ops', 'ops_cancel_trip', { ...tripOf(), note: 'incident', fee_cents: 400 }), 'cancellation_fee', 400, 'ops_cancelled'],
+      ['ops cancels with a fee', () => as('ops', 'ops_cancel_trip', { ...tripOf(), reason_code: 'fraud_suspected', note: 'incident', fee_cents: 400 }), 'cancellation_fee', 400, 'ops_cancelled'],
     ])('finalizes a statement when %s', (_name, end, basis, fee, outcome) => {
       matched('r1', 'rider-1', 'd1', 1500)
       end()
@@ -2204,7 +2216,7 @@ describe('notifications', () => {
 
     it('an ops cancellation tells both the rider and the driver', () => {
       matched()
-      as('ops', 'ops_cancel_trip', { ...trip(), note: 'incident', fee_cents: 0 })
+      as('ops', 'ops_cancel_trip', { ...trip(), reason_code: 'safety_incident', note: 'incident', fee_cents: 0 })
       expect(inbox('rider-1').find((n) => n.kind === 'trip_cancelled')).toMatchObject({ role: 'rider', link: '/trip/r1' })
       expect(inbox('d1').find((n) => n.kind === 'trip_cancelled')).toMatchObject({ role: 'driver', link: '/driver/trip/rider-1/r1' })
     })
@@ -2439,6 +2451,423 @@ describe('notifications', () => {
       emailResult('failed', NOW + 160_000, 'd1', 'smtp'); emailResult('failed', NOW + 200_000); emailResult('failed', NOW + 400_000)
       expect((mineOnly(NOW + 500_000) as unknown as { code: string }[]).map((i) => i.code).sort()).toEqual(['email_failed', 'push_failed'])
       expect(JSON.stringify(as('ops', 'ops_list_notification_issues', {}, NOW + 500_000))).not.toContain('Driver d1')
+    })
+  })
+})
+
+describe('operations console', () => {
+  let db: Db
+  const NOW = Date.UTC(2026, 5, 1)
+  const MIN = 60_000
+  const SYDNEY = { lat: -33.8688, lng: 151.2093 }
+  const AIRPORT = { lat: -33.8688 + 0.045, lng: 151.2093 } // ~5 km north
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const as = (user: string, name: string, params: Record<string, unknown> = {}, now = NOW) => call(db, name, params, user, now)
+  const makeDriver = (id: string) => {
+    as(id, 'save_driver_application', { full_name: `Driver ${id}`, phone: '555-0100', licence_number: `LIC-${id}`, licence_region: 'NSW', licence_expires: '2030-01-01', eligibility_confirmed: 1 })
+    as(id, 'save_driver_vehicle', { vehicle_id: `v-${id}`, plate: `PL-${id}`, make: 'T', model: 'C', vehicle_class: 'share' })
+    as(id, 'submit_driver_application')
+    as('ops', 'review_driver_application', { driver_user_id: id, decision: 'approved' })
+    as(id, 'update_driver_location', { ...SYDNEY, service_radius_km: 10 })
+    as(id, 'set_driver_availability', { available: 1, vehicle_id: `v-${id}` })
+  }
+  const matched = (id = 'r1', rider = 'rider-1', driver = 'd1') => {
+    if (!db.prepare('SELECT 1 FROM drivers WHERE user_id = ?').get(driver)) makeDriver(driver)
+    db.prepare('UPDATE driver_availability SET available = CASE WHEN user_id = ? THEN 1 ELSE 0 END').run(driver)
+    as(rider, 'save_ride', { ...rideToRecords({ id, pickup: '12 Secret Lane', pickupCoord: SYDNEY, dropoff: '1 Airport Rd', dropoffCoord: AIRPORT, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share', fareCents: 1500 }) })
+    as(rider, 'save_rider_profile', { display_name: 'Rita Rider', phone: '555-0199', notify_email: 0, notify_sms: 0, notify_trip_updates: 1 })
+    as(rider, 'request_dispatch', { request_id: id })
+    as(rider, 'dispatch_tick', { request_id: id })
+    as(driver, 'accept_offer', { rider_id: rider, request_id: id })
+  }
+  const trip = (id = 'r1', rider = 'rider-1') => ({ rider_id: rider, trip_id: `${id}:trip` })
+  const step = (to: string, driver = 'd1', id = 'r1', rider = 'rider-1', now = NOW) => as(driver, 'advance_trip', { ...trip(id, rider), to_status: to }, now)
+  const ping = (driver = 'd1', at = NOW, pos = SYDNEY, id = 'r1', rider = 'rider-1') => as(driver, 'publish_driver_location', { ...trip(id, rider), ...pos, accuracy_m: 8 }, at)
+  const complete = () => {
+    step('en_route'); ping('d1', NOW)
+    step('arrived', 'd1', 'r1', 'rider-1', NOW + 1000)
+    as('d1', 'start_trip', trip(), NOW + 2000)
+    ping('d1', NOW + 5000, AIRPORT)
+    step('completed', 'd1', 'r1', 'rider-1', NOW + 6000)
+  }
+  /** The staff trail after setup (drivers are approved at NOW in the helpers). */
+  const trail = (extra: Record<string, unknown> = {}) => (as('ops', 'ops_list_audit', extra) as Record<string, unknown>[]).filter((a) => (a.at as number) > NOW)
+  const search = (params: Record<string, unknown> = {}, who = 'ops') => as(who, 'ops_search_trips', params) as Record<string, unknown>[]
+
+  describe('roles', () => {
+    it('every ops tool is role-gated; PII tools need ops_pii', () => {
+      const gated = (mcpFile.tools as unknown as { name: string; auth?: { app_roles: string[] } }[]).filter((t) => t.name.startsWith('ops_'))
+      expect(gated.length).toBeGreaterThan(15)
+      for (const t of gated) expect(t.auth, t.name).toBeDefined()
+      for (const name of ['ops_log_access', 'ops_get_trip_pii', 'ops_get_trip_evidence_pii', 'get_driver_application_detail'])
+        expect(tool(name), name).toMatchObject({ auth: { required: true, app_roles: ['ops_pii'] } })
+      for (const name of ['ops_search_trips', 'ops_get_trip', 'ops_get_trip_offers', 'ops_get_trip_evidence', 'ops_cancel_trip', 'ops_suspend_driver', 'ops_reinstate_driver', 'ops_request_refund', 'ops_decide_refund', 'ops_escalate', 'ops_resolve_escalation', 'ops_list_audit'])
+        expect(tool(name), name).toMatchObject({ auth: { required: true, app_roles: ['ops'] } })
+    })
+
+    it('rider and driver actions are never role-gated', () => {
+      for (const name of ['cancel_ride', 'advance_trip', 'start_trip', 'open_dispute', 'get_receipt']) expect((tool(name) as unknown as { auth?: unknown }).auth, name).toBeUndefined()
+    })
+  })
+
+  describe('search and inspect', () => {
+    it('finds trips by trip id, ride id, rider, driver or receipt number — exact matches only', () => {
+      matched(); complete()
+      matched('r2', 'rider-2', 'd2')
+      const receipt = (db.prepare('SELECT receipt_no FROM fare_statements').get() as { receipt_no: string }).receipt_no
+      for (const q of ['r1:trip', 'r1', 'rider-1', 'd1', receipt]) expect(search({ q }).map((r) => r.trip_id), q).toEqual(['r1:trip'])
+      expect(search({ q: 'rider' })).toEqual([]) // no partial matching
+      expect(search({ q: 'nobody' })).toEqual([])
+      expect(search().map((r) => r.trip_id).sort()).toEqual(['r1:trip', 'r2:trip'])
+    })
+
+    it('filters by status and shows phase, outcome, amounts and dispatch state', () => {
+      matched(); complete()
+      matched('r2', 'rider-2', 'd2')
+      expect(search({ status: 'completed' })).toMatchObject([{ trip_id: 'r1:trip', phase: 'completed', outcome: 'completed', final_cents: 1500, dispatch_status: 'matched', driver_user_id: 'd1', vehicle_class: 'share', dispute_open: 0 }])
+      expect(search({ status: 'scheduled' })).toMatchObject([{ trip_id: 'r2:trip', phase: 'scheduled', outcome: null }])
+    })
+
+    it('shows an in-progress phase and an open dispute', () => {
+      matched(); step('en_route'); step('arrived'); as('d1', 'start_trip', trip())
+      expect(search({ q: 'r1' })).toMatchObject([{ phase: 'in_progress' }])
+      step('completed')
+      as('rider-1', 'open_dispute', { ...trip(), reason_code: 'overcharged' }, NOW + 1000)
+      expect(search({ q: 'r1' })).toMatchObject([{ phase: 'completed', dispute_open: 1 }])
+    })
+
+    it('redacts personal details everywhere in the basic views', () => {
+      matched(); complete()
+      const everything = JSON.stringify([search(), as('ops', 'ops_get_trip', trip()), as('ops', 'ops_get_trip_offers', { rider_id: 'rider-1', request_id: 'r1' }), as('ops', 'ops_get_trip_evidence', trip()), as('ops', 'ops_get_trip_timeline', trip())])
+      for (const secret of ['12 Secret Lane', '1 Airport Rd', 'Rita Rider', 'Driver d1', 'PL-d1', '555-0199', 'LIC-d1', String(SYDNEY.lat), String(SYDNEY.lng)]) expect(everything, secret).not.toContain(secret)
+    })
+
+    it('inspects a trip: lifecycle, fees, assignment and dispatch, counts', () => {
+      matched()
+      as('rider-1', 'cancel_ride', { request_id: 'r1', reason_code: 'wrong_pickup' }, NOW + 3 * MIN)
+      expect(as('ops', 'ops_get_trip', trip())).toMatchObject([{ trip_id: 'r1:trip', phase: 'cancelled', outcome: 'rider_cancelled', cancelled_by_role: 'rider', cancel_code: 'wrong_pickup', cancel_fee_cents: 500, fee_policy: 'late_cancel', assignment_status: 'accepted', dispatch_status: 'cancelled', dispatch_attempts: 1, final_cents: 500, disputes: 0, refund_requests: 0 }])
+    })
+
+    it('shows the dispatch chain with each driver offered and what happened', () => {
+      matched()
+      expect(as('ops', 'ops_get_trip_offers', { rider_id: 'rider-1', request_id: 'r1' })).toMatchObject([{ attempt: 1, driver_user_id: 'd1', status: 'accepted' }])
+    })
+
+    it('hides trips the staff member took part in', () => {
+      matched()
+      expect(search({}, 'rider-1')).toEqual([])
+      expect(search({}, 'd1')).toEqual([])
+      expect(as('rider-1', 'ops_get_trip', trip())).toEqual([])
+      expect(as('d1', 'ops_get_trip', trip())).toEqual([])
+      expect(as('d1', 'ops_get_trip_evidence', trip())).toEqual([])
+    })
+  })
+
+  describe('location evidence', () => {
+    it('keeps coarse snapshots when the driver arrives, the trip starts and it ends, while the live position is still deleted', () => {
+      matched(); complete()
+      expect(db.prepare('SELECT kind FROM trip_evidence ORDER BY captured_at').all()).toEqual([{ kind: 'arrived' }, { kind: 'started' }, { kind: 'ended' }])
+      expect(count(db, 'trip_locations')).toBe(0) // the retention rule from #8 is unchanged
+    })
+
+    it('records a snapshot on a no-show cancellation too', () => {
+      matched(); step('en_route'); ping('d1', NOW); step('arrived', 'd1', 'r1', 'rider-1', NOW + 1000); ping('d1', NOW + 4000)
+      as('d1', 'report_rider_no_show', trip(), NOW + 6 * MIN)
+      expect(db.prepare('SELECT kind FROM trip_evidence ORDER BY captured_at').all()).toEqual([{ kind: 'arrived' }])
+    })
+
+    it('records an ended snapshot when a fresh position exists at the end', () => {
+      matched(); step('en_route'); ping('d1', NOW); step('arrived', 'd1', 'r1', 'rider-1', NOW + 1000)
+      ping('d1', NOW + 5 * MIN)
+      as('d1', 'report_rider_no_show', trip(), NOW + 5 * MIN + 5000)
+      expect(db.prepare('SELECT kind FROM trip_evidence ORDER BY captured_at').all()).toEqual([{ kind: 'arrived' }, { kind: 'ended' }])
+    })
+
+    it('takes no snapshot from a stale position', () => {
+      matched(); step('en_route'); ping('d1', NOW)
+      step('arrived', 'd1', 'r1', 'rider-1', NOW + 61_000) // the last ping is 61 s old
+      expect(count(db, 'trip_evidence')).toBe(0)
+    })
+
+    it('tells ops how close the driver was, without coordinates', () => {
+      matched(); complete()
+      const evidence = as('ops', 'ops_get_trip_evidence', trip()) as { kind: string; proximity: string }[]
+      expect(evidence.map((e) => [e.kind, e.proximity])).toEqual([['arrived', 'within_150m'], ['started', 'within_150m'], ['ended', 'within_150m']])
+      expect(JSON.stringify(evidence)).not.toMatch(/"lat"|"lng"/)
+    })
+
+    it('flags a driver who was nowhere near the pickup', () => {
+      matched(); step('en_route'); ping('d1', NOW, AIRPORT)
+      step('arrived', 'd1', 'r1', 'rider-1', NOW + 1000)
+      expect(as('ops', 'ops_get_trip_evidence', trip())).toMatchObject([{ kind: 'arrived', proximity: 'farther' }])
+    })
+
+    it('buckets distance: within 500 m and within 2 km', () => {
+      for (const [km, expected] of [[0.3, 'within_500m'], [1.2, 'within_2km']] as const) {
+        db = new DatabaseSync(':memory:'); migrate(db, new Set())
+        matched(); step('en_route'); ping('d1', NOW, { lat: SYDNEY.lat + km * 0.009, lng: SYDNEY.lng })
+        step('arrived', 'd1', 'r1', 'rider-1', NOW + 1000)
+        expect(as('ops', 'ops_get_trip_evidence', trip())).toMatchObject([{ proximity: expected }])
+      }
+    })
+
+    it('is deleted after 30 days on the next location publish, and with the rider\'s account', () => {
+      matched(); complete()
+      matched('r2', 'rider-2', 'd2')
+      const later = NOW + 31 * 24 * 60 * MIN
+      as('d2', 'advance_trip', { ...trip('r2', 'rider-2'), to_status: 'en_route' }, later)
+      ping('d2', later, SYDNEY, 'r2', 'rider-2')
+      expect(count(db, 'trip_evidence')).toBe(0)
+      db = new DatabaseSync(':memory:'); migrate(db, new Set())
+      matched(); complete()
+      expect(count(db, 'trip_evidence')).toBe(3)
+      as('rider-1', 'delete_my_rider_data')
+      expect(count(db, 'trip_evidence')).toBe(0)
+    })
+
+    it('exact coordinates need ops_pii and a logged reason, and the access expires', () => {
+      matched(); complete()
+      const read = (who: string, now: number) => as(who, 'ops_get_trip_evidence_pii', trip(), now) as { kind: string; lat: number }[]
+      expect(read('pii-1', NOW + 10_000)).toEqual([]) // never logged a reason
+      as('pii-1', 'ops_log_access', { scope: 'evidence', ...trip(), reason_code: 'dispute' }, NOW + 7000)
+      expect(read('pii-1', NOW + 7500).map((e) => e.kind)).toEqual(['arrived', 'started', 'ended'])
+      expect(read('pii-1', NOW + 7500)[0].lat).toBeCloseTo(SYDNEY.lat, 3)
+      expect(read('pii-2', NOW + 7500)).toEqual([]) // someone else's reason does not count
+      expect(as('pii-1', 'ops_get_trip_pii', trip(), NOW + 7500)).toEqual([]) // the scope was evidence, not trip_pii
+      expect(read('pii-1', NOW + 7000 + 10 * MIN + 1)).toEqual([])
+    })
+  })
+
+  describe('personal data access', () => {
+    const logAccess = (who = 'pii-1', extra: Record<string, unknown> = {}, now = NOW) => as(who, 'ops_log_access', { scope: 'trip_pii', ...trip(), reason_code: 'support_ticket', ...extra }, now)
+
+    it('returns addresses, names and plate only after a logged reason', () => {
+      matched(); complete()
+      expect(as('pii-1', 'ops_get_trip_pii', trip())).toEqual([])
+      logAccess()
+      expect(as('pii-1', 'ops_get_trip_pii', trip())).toEqual([{ trip_id: 'r1:trip', pickup_label: '12 Secret Lane', dropoff_label: '1 Airport Rd', rider_name: 'Rita Rider', driver_name: 'Driver d1', plate: 'PL-d1' }])
+    })
+
+    it('requires a valid reason and scope, and never for trips the staff member took part in', () => {
+      matched()
+      logAccess('pii-1', { reason_code: 'curiosity' })
+      logAccess('pii-1', { scope: 'everything' })
+      logAccess('pii-1', { trip_id: 'ghost:trip' })
+      logAccess('rider-1')
+      logAccess('d1')
+      logAccess('pii-1', { scope: 'driver_pii', driver_user_id: 'pii-1', rider_id: undefined, trip_id: undefined })
+      expect(count(db, 'ops_access_log')).toBe(0)
+      logAccess('pii-1', { reason_code: 'legal_request' })
+      expect(db.prepare('SELECT actor_id, scope, reason_code, rider_id, trip_id, at FROM ops_access_log').all()).toEqual([{ actor_id: 'pii-1', scope: 'trip_pii', reason_code: 'legal_request', rider_id: 'rider-1', trip_id: 'r1:trip', at: NOW }])
+    })
+
+    it('every access appears in the audit trail', () => {
+      matched()
+      logAccess('pii-1', {}, NOW + 3)
+      expect(trail()).toMatchObject([{ action: 'pii_access_trip_pii', actor_id: 'pii-1', trip_id: 'r1:trip', reason_code: 'support_ticket', at: NOW + 3 }])
+    })
+  })
+
+  describe('support actions need reason codes and are audited', () => {
+    const audit = trail
+
+    it('cancels with a valid reason code, note and fee, and records all three', () => {
+      matched(); step('en_route')
+      const attempt = (bad: Record<string, unknown>) => { try { as('ops', 'ops_cancel_trip', { ...trip(), reason_code: 'other', note: 'x', fee_cents: 0, ...bad }) } catch { /* a missing required parameter is also a refusal */ } }
+      attempt({ reason_code: 'whim' }); attempt({ reason_code: undefined }); attempt({ note: ' ' })
+      expect(db.prepare('SELECT status FROM trips').get()).toEqual({ status: 'en_route' })
+      as('ops', 'ops_cancel_trip', { ...trip(), reason_code: 'vehicle_issue', note: 'tow truck called', fee_cents: 0 }, NOW + 1)
+      expect(db.prepare('SELECT status FROM trips').get()).toEqual({ status: 'cancelled' })
+      expect(db.prepare('SELECT cancel_code, cancel_note, cancelled_by_role FROM trip_lifecycle').get()).toEqual({ cancel_code: 'vehicle_issue', cancel_note: 'tow truck called', cancelled_by_role: 'ops' })
+      expect(audit()).toMatchObject([{ action: 'trip_cancelled', actor_id: 'ops', trip_id: 'r1:trip', reason_code: 'vehicle_issue', note: 'tow truck called', at: NOW + 1 }])
+    })
+
+    it('suspends a driver only with a reason code and note, and the driver goes off dispatch', () => {
+      makeDriver('d1')
+      const suspend = (extra: Record<string, unknown>) => as('ops', 'ops_suspend_driver', { driver_user_id: 'd1', reason_code: 'safety', note: 'two complaints', ...extra }, NOW + 5)
+      suspend({ reason_code: 'because' }); suspend({ note: '  ' }); suspend({ driver_user_id: 'ghost' })
+      as('ops', 'review_driver_application', { driver_user_id: 'd1', decision: 'suspended', reason: 'no code' }) // the old route is closed
+      expect(db.prepare('SELECT status FROM driver_applications').get()).toEqual({ status: 'approved' })
+      suspend({})
+      expect(db.prepare('SELECT status, status_reason, reviewed_by FROM driver_applications').get()).toEqual({ status: 'suspended', status_reason: 'safety: two complaints', reviewed_by: 'ops' })
+      expect(as('ops', 'list_dispatchable_drivers')).toEqual([])
+      expect(db.prepare('SELECT available FROM driver_availability').get()).toEqual({ available: 0 })
+      expect(audit()).toMatchObject([{ action: 'driver_suspended', actor_id: 'ops', driver_user_id: 'd1', note: 'safety: two complaints', at: NOW + 5 }])
+      suspend({}) // repeating changes nothing
+      expect(audit().filter((a) => a.action === 'driver_suspended')).toHaveLength(1)
+    })
+
+    it('withdraws an offer that was open to the suspended driver', () => {
+      makeDriver('d1')
+      as('rider-1', 'save_ride', { ...rideToRecords({ id: 'r1', pickup: 'A', pickupCoord: SYDNEY, dropoff: 'B', dropoffCoord: null, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share', fareCents: 1500 }) })
+      as('rider-1', 'request_dispatch', { request_id: 'r1' }); as('rider-1', 'dispatch_tick', { request_id: 'r1' })
+      expect(as('d1', 'list_my_offers')).toHaveLength(1)
+      as('ops', 'ops_suspend_driver', { driver_user_id: 'd1', reason_code: 'fraud_suspected', note: 'checking' })
+      expect(as('d1', 'list_my_offers')).toEqual([])
+    })
+
+    it('reinstates with a reason code; the driver must opt in again; staff cannot lift their own suspension', () => {
+      makeDriver('d1')
+      as('ops', 'ops_suspend_driver', { driver_user_id: 'd1', reason_code: 'complaint', note: 'x' }, NOW + 5)
+      as('ops', 'ops_reinstate_driver', { driver_user_id: 'd1', reason_code: 'nope', note: 'ok' })
+      as('ops', 'ops_reinstate_driver', { driver_user_id: 'd1', reason_code: 'review_complete', note: ' ' })
+      as('d1', 'ops_reinstate_driver', { driver_user_id: 'd1', reason_code: 'error', note: 'self' })
+      expect(db.prepare('SELECT status FROM driver_applications').get()).toEqual({ status: 'suspended' })
+      as('ops', 'ops_reinstate_driver', { driver_user_id: 'd1', reason_code: 'review_complete', note: 'cleared by safety team' }, NOW + 9)
+      expect(db.prepare('SELECT status, status_reason FROM driver_applications').get()).toEqual({ status: 'approved', status_reason: null })
+      expect(as('ops', 'list_dispatchable_drivers')).toEqual([]) // still offline until they opt in
+      expect(audit().map((a) => a.action)).toEqual(['driver_approved', 'driver_suspended'])
+      expect(audit()[0]).toMatchObject({ note: 'review_complete: cleared by safety team', at: NOW + 9 })
+    })
+
+    it('cannot suspend yourself', () => {
+      makeDriver('ops-driver')
+      as('ops-driver', 'ops_suspend_driver', { driver_user_id: 'ops-driver', reason_code: 'safety', note: 'x' })
+      expect(db.prepare('SELECT status FROM driver_applications').get()).toEqual({ status: 'approved' })
+    })
+
+    it('records a credit with its actor and reason in the same trail', () => {
+      matched(); complete()
+      as('ops', 'ops_credit_trip', { ...trip(), request_key: 'k', amount_cents: 200, reason_code: 'goodwill', note: 'late pickup' }, NOW + 20_000)
+      expect(audit({ trip_id: 'r1:trip' }).find((a) => a.action === 'credit')).toMatchObject({ actor_id: 'ops', reason_code: 'goodwill', amount_cents: 200, at: NOW + 20_000 })
+    })
+
+    it('records dispute decisions and the fee waiver', () => {
+      matched(); as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + 3 * MIN)
+      as('rider-1', 'open_dispute', { ...trip(), reason_code: 'cancel_fee' }, NOW + 4 * MIN)
+      as('ops', 'ops_resolve_dispute', { ...trip(), opened_by: 'rider-1', decision: 'upheld', note: 'driver late', waive_fee: 1 }, NOW + 5 * MIN)
+      expect(audit({ trip_id: 'r1:trip' }).map((a) => a.action)).toEqual(expect.arrayContaining(['fee_waived', 'dispute_resolved', 'credit']))
+    })
+
+    it('filters the trail by trip and by actor, newest first, and omits riders\' and drivers\' own actions', () => {
+      matched(); complete()
+      matched('r2', 'rider-2', 'd2')
+      as('ops', 'ops_cancel_trip', { ...trip('r2', 'rider-2'), reason_code: 'other', note: 'dup', fee_cents: 0 }, NOW + 100)
+      as('ops-2', 'ops_escalate', { request_key: 'e1', ...trip('r1'), level: 'lead', reason_code: 'safety', note: 'look' }, NOW + 200)
+      expect(audit({ trip_id: 'r2:trip' }).map((a) => a.action)).toEqual(['trip_cancelled'])
+      expect(audit({ actor: 'ops-2' }).map((a) => a.action)).toEqual(['escalated_lead'])
+      const all = audit()
+      expect(all.map((a) => a.at)).toEqual([...all.map((a) => a.at as number)].sort((x, y) => y - x))
+      expect(all.every((a) => ['ops', 'ops-2'].includes(a.actor_id as string))).toBe(true)
+    })
+  })
+
+  describe('refund requests', () => {
+    const request = (extra: Record<string, unknown> = {}, who = 'ops') => as(who, 'ops_request_refund', { ...trip(), request_key: 'k1', amount_cents: 600, reason_code: 'overcharged', note: 'meter ran long', ...extra })
+    const rows = () => db.prepare('SELECT id, amount_cents, reason_code, status, requested_by, decided_by FROM refund_requests').all()
+
+    it('records a request with reason, note, amount and requester, but moves no money', () => {
+      matched(); complete()
+      request()
+      expect(rows()).toEqual([{ id: 'k1', amount_cents: 600, reason_code: 'overcharged', status: 'requested', requested_by: 'ops', decided_by: null }])
+      expect(count(db, 'fare_adjustments')).toBe(0)
+      expect(as('rider-1', 'get_receipt', { request_id: 'r1' })).toMatchObject([{ total_cents: 1500 }])
+    })
+
+    it('rejects bad input, over-asking, and repeats of a key', () => {
+      matched(); complete()
+      request({ reason_code: 'greed' }); request({ note: ' ' }); request({ amount_cents: 0 }); request({ request_key: ' ' }); request({ trip_id: 'ghost' })
+      request({ amount_cents: 1501 })
+      expect(rows()).toEqual([])
+      request({ amount_cents: 1000 })
+      request({ amount_cents: 1000 }) // same key: ignored
+      request({ request_key: 'k2', amount_cents: 501 }) // only 500 left after the open request
+      expect(rows()).toHaveLength(1)
+      request({ request_key: 'k3', amount_cents: 500 })
+      expect(rows()).toHaveLength(2)
+    })
+
+    it('counts credits against the amount that can be requested', () => {
+      matched(); complete()
+      as('ops', 'ops_credit_trip', { ...trip(), request_key: 'c', amount_cents: 1000, reason_code: 'goodwill', note: 'x' })
+      request({ amount_cents: 501 })
+      expect(rows()).toEqual([])
+      request({ amount_cents: 500 })
+      expect(rows()).toHaveLength(1)
+    })
+
+    it('needs a second person to decide, who is not the requester or a participant', () => {
+      matched(); complete()
+      request()
+      const decide = (who: string, extra: Record<string, unknown> = {}) => as(who, 'ops_decide_refund', { rider_id: 'rider-1', request_key: 'k1', decision: 'approved', note: 'checked the meter', ...extra }, NOW + 1)
+      decide('ops') // the requester
+      decide('rider-1'); decide('d1') // participants
+      decide('ops-2', { note: ' ' }); decide('ops-2', { decision: 'maybe' })
+      expect(rows()[0]).toMatchObject({ status: 'requested', decided_by: null })
+      decide('ops-2')
+      expect(rows()[0]).toMatchObject({ status: 'approved', decided_by: 'ops-2' })
+      decide('ops-3', { decision: 'rejected' }) // already decided
+      expect(rows()[0]).toMatchObject({ status: 'approved', decided_by: 'ops-2' })
+      expect(count(db, 'fare_adjustments')).toBe(0) // approval records the decision only
+    })
+
+    it('lists requests by status and puts both steps in the audit trail', () => {
+      matched(); complete()
+      request()
+      expect(as('ops-2', 'ops_list_refund_requests')).toMatchObject([{ request_key: 'k1', status: 'requested', amount_cents: 600, requested_by: 'ops' }])
+      as('ops-2', 'ops_decide_refund', { rider_id: 'rider-1', request_key: 'k1', decision: 'rejected', note: 'within tolerance' }, NOW + 5)
+      expect(as('ops-2', 'ops_list_refund_requests')).toEqual([])
+      expect(as('ops-2', 'ops_list_refund_requests', { status: 'rejected' })).toMatchObject([{ decision_note: 'within tolerance', decided_by: 'ops-2' }])
+      expect(trail().map((a) => a.action)).toEqual(['refund_rejected'])
+      expect((as('ops', 'ops_list_audit', { trip_id: 'r1:trip' }) as { action: string }[]).map((a) => a.action)).toEqual(['refund_rejected', 'refund_requested'])
+    })
+
+    it('is erased with the rider\'s account', () => {
+      matched(); complete(); request()
+      as('rider-1', 'delete_my_rider_data')
+      expect(rows()).toEqual([])
+    })
+
+    it('cannot be requested on a trip the staff member rode or drove', () => {
+      matched(); complete()
+      request({}, 'rider-1'); request({}, 'd1')
+      expect(rows()).toEqual([])
+    })
+  })
+
+  describe('escalations', () => {
+    const escalate = (extra: Record<string, unknown> = {}, who = 'ops') => as(who, 'ops_escalate', { request_key: 'e1', ...trip(), level: 'safety', reason_code: 'safety', note: 'driver reported an incident', ...extra })
+    const rows = () => db.prepare('SELECT id, rider_id, trip_id, driver_user_id, level, reason_code, status, opened_by, resolved_by FROM ops_escalations ORDER BY id').all()
+
+    it('escalates a trip or a driver with a level, reason code and note', () => {
+      matched()
+      escalate()
+      escalate({ request_key: 'e2', rider_id: undefined, trip_id: undefined, driver_user_id: 'd1', level: 'lead', reason_code: 'abuse' })
+      expect(rows()).toEqual([
+        { id: 'e1', rider_id: 'rider-1', trip_id: 'r1:trip', driver_user_id: null, level: 'safety', reason_code: 'safety', status: 'open', opened_by: 'ops', resolved_by: null },
+        { id: 'e2', rider_id: null, trip_id: null, driver_user_id: 'd1', level: 'lead', reason_code: 'abuse', status: 'open', opened_by: 'ops', resolved_by: null },
+      ])
+    })
+
+    it('rejects unknown levels and codes, blank notes and keys, nothing to escalate, and unknown targets', () => {
+      matched()
+      escalate({ level: 'president' }); escalate({ reason_code: 'boredom' }); escalate({ note: ' ' }); escalate({ request_key: ' ' })
+      escalate({ rider_id: undefined, trip_id: undefined, driver_user_id: undefined }) // no target
+      escalate({ trip_id: 'ghost:trip' }); escalate({ rider_id: undefined, trip_id: undefined, driver_user_id: 'ghost' })
+      expect(rows()).toEqual([])
+      escalate(); escalate() // repeating a key is a no-op
+      expect(rows()).toHaveLength(1)
+    })
+
+    it('another person resolves it, with a note, once', () => {
+      matched()
+      escalate()
+      const resolve = (who: string, note = 'safety team called the driver') => as(who, 'ops_resolve_escalation', { request_key: 'e1', note }, NOW + 9)
+      resolve('ops'); resolve('ops-2', ' ')
+      expect(rows()[0]).toMatchObject({ status: 'open' })
+      expect(as('ops-2', 'ops_list_escalations')).toHaveLength(1)
+      resolve('ops-2')
+      expect(rows()[0]).toMatchObject({ status: 'resolved', resolved_by: 'ops-2' })
+      resolve('ops-3', 'again')
+      expect(db.prepare('SELECT resolved_by, resolution_note FROM ops_escalations').get()).toEqual({ resolved_by: 'ops-2', resolution_note: 'safety team called the driver' })
+      expect(as('ops-2', 'ops_list_escalations')).toEqual([])
+      expect(as('ops-2', 'ops_list_escalations', { status: 'resolved' })).toHaveLength(1)
+      expect((as('ops', 'ops_list_audit', { trip_id: 'r1:trip' }) as { action: string }[]).map((a) => a.action)).toEqual(['escalation_resolved', 'escalated_safety'])
     })
   })
 })

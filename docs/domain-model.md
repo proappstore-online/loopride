@@ -124,7 +124,7 @@ keyed by the driver's own PAS user id, not by a rider. Client: `/driver/onboardi
 confirmation, plus at least one vehicle (plate, make, model, optional year,
 colour, seats). Editable only while `draft` or `rejected`. Licence details are
 private: readable only by the applicant (`get_my_driver_application`) and by `ops`;
-the ops list shows just the last 4 characters of the licence number. Document
+the ops list shows only the last 4 characters of the licence number (issue #11 tightened this further: a first initial and a masked phone, with full details behind `ops_pii` and a logged reason). Document
 images are not collected; only structured data is stored, and nothing is
 public. Adding image upload later should use private storage.
 
@@ -455,6 +455,69 @@ account deletion is now two idempotent actions, `delete_my_rider_data` and
 **Known gaps.** Push needs the browser permission and the actor's client to be running.
 Delivery results are only as accurate as the platform's `sent` count. Spanish copy has not
 been reviewed by a native speaker. The pending-delivery list is not shown to the recipient.
+
+## Operations console (issue #11)
+
+Route `/ops` (staff only). Migration `0011_ops_console`: `trip_evidence`, `refund_requests`,
+`ops_escalations`, `ops_access_log`. Client: `lib/opsConsole.ts`, `views/Ops.tsx` and
+`views/ops/*` (tabs: Trips, Drivers, Disputes, Refunds, Escalations, Audit).
+
+**Roles.** Two PAS app roles, granted by the app owner with `app.roles.assign`:
+`ops` for the console and every support action, and `ops_pii` for opening personal
+details. Holders of `ops_pii` should hold `ops` too. Every ops action is gated by the
+platform before its SQL runs, and the SQL also keeps staff out of trips they rode or
+drove. Assumption to confirm after deploy: a tool listing one role admits holders of that role.
+
+**Search and inspect (redacted).** `ops_search_trips` finds trips by whole trip id, ride id,
+rider id, driver id or receipt number, optionally by status (no partial or fuzzy matching, so
+it cannot be used to browse people). `ops_get_trip` shows the phase, who ended the trip and
+why, fees, assignment and dispatch status, amounts and dispute/refund counts;
+`ops_get_trip_offers` the dispatch chain; `ops_get_trip_timeline` the interleaved history.
+None return names, addresses, plates, phone numbers or coordinates.
+
+**Location evidence.** The live position is still deleted when a trip ends (#8). To settle
+disputes, up to three **coarse snapshots** (driver arrived, trip started, trip ended; rounded
+to about 11 m, taken only from a position under 60 seconds old) are kept for **30 days**
+and deleted with the rider's account. Ops see how close the driver was to the pickup (or
+the drop-off at the end of a completed trip): within 150 m, 500 m, 2 km, farther, or unknown.
+Exact coordinates need `ops_pii` and a logged reason.
+
+**Personal data is role-limited, reasoned and logged.** Names, addresses, plate, exact
+coordinates and driver licence details are returned only to `ops_pii`, only after
+`ops_log_access` recorded the staff member, scope (`trip_pii`, `evidence`, `driver_pii`),
+the target and a reason code (`support_ticket`, `dispute`, `safety_incident`, `fraud_check`,
+`legal_request`), and only for 10 minutes afterwards. Every access is in the audit trail. The
+driver-application list was redacted too (initial, last 2 phone digits, last 4 licence
+characters).
+
+**Support actions all need a reason code and a note:**
+
+| Action | Reason codes | Rules |
+|---|---|---|
+| Cancel a trip (`ops_cancel_trip`) | safety_incident, rider_request, driver_request, vehicle_issue, fraud_suspected, payment_issue, duplicate_request, other | any unfinished trip, optional capped fee |
+| Suspend / reinstate a driver | safety, fraud_suspected, document_expired, repeated_cancellations, complaint, other / review_complete, documents_renewed, error, other | replaces the old suspend path in `review_driver_application`, which no longer suspends; suspension takes the driver off dispatch and withdraws open offers |
+| Credit (`ops_credit_trip`) | goodwill, fare_error, duplicate_charge, other | never above the statement amount |
+| Request a refund (`ops_request_refund`) | overcharged, service_failure, duplicate_charge, cancel_fee_dispute, other | **a second person decides** (`ops_decide_refund`); records the decision only, no money moves while payments are not enabled (ADR 0001) |
+| Escalate (`ops_escalate`) | safety, legal_request, fraud, abuse, regulator_or_press, other | to lead, safety or legal; **someone else resolves it** |
+| Resolve a dispute | decision and note, optional fee waiver | (from #7) |
+
+Staff cannot act on their own application, suspension, trips, or requests they made, and
+retried submissions are ignored through request keys.
+
+**One audit trail.** `ops_list_audit` returns every staff action newest first with the actor,
+time, target, reason code, note and amount: cancellations, fee waivers, dispute decisions,
+credits, driver approvals/rejections/suspensions/reinstatements, vehicle decisions, refund
+requests and decisions, escalations and resolutions, and every personal-data access. It
+reads the append-only logs the actions already write, so no action can skip it. It can be
+filtered by trip and by staff member.
+
+**Retention and deletion.** Account deletion removes a rider's evidence snapshots and refund
+requests. Escalation records and the personal-data access log are kept as the staff audit
+trail (they hold ids, codes and staff notes, not trip content).
+
+**Known gaps.** Staff notes are free text and can contain personal data; staff are told not to
+put it there but nothing checks. There is no ticketing, assignment or SLA tracking. Dispute
+and refund queues have no search. Executing an approved refund waits on payments (ADR 0001).
 
 ## Migrating legacy rides
 

@@ -38,8 +38,8 @@ describe('driver onboarding client', () => {
 
   it('offers only valid decisions per state', () => {
     expect(decisionsFor('submitted')).toEqual(['approved', 'rejected'])
-    expect(decisionsFor('approved')).toEqual(['suspended'])
-    expect(decisionsFor('suspended')).toEqual(['approved'])
+    expect(decisionsFor('approved')).toEqual([]) // suspending and reinstating need a reason code: operations console
+    expect(decisionsFor('suspended')).toEqual([])
     expect(decisionsFor('draft')).toEqual([])
     expect(decisionsFor('rejected')).toEqual([])
   })
