@@ -76,7 +76,7 @@ const DROP = { lat: -33.8238, lng: 151.2093 }
 interface Stored { id: string; vehicle_class: string; total_cents: number; nearby_drivers: number; expires_at: number; surge_milli?: number; min_adjust_cents?: number }
 
 /** A fake server: create_quote stores per-tier quotes, accept_quote consults `outcome`. */
-function serve(opts: { nearby?: Record<string, number>; outcome?: 'accepted' | 'expired' | 'superseded'; expiresIn?: number; surge?: number } = {}) {
+function serve(opts: { nearby?: Record<string, number>; outcome?: 'accepted' | 'expired' | 'superseded'; expiresIn?: number; surge?: number; paused?: boolean } = {}) {
   const stored: Stored[] = []
   const totals: Record<string, number> = { share: 1150, comfort: 1530, xl: 1950 }
   let accepted: { quote_id: string; ride_id: string } | null = null
@@ -88,6 +88,7 @@ function serve(opts: { nearby?: Record<string, number>; outcome?: 'accepted' | '
     }
     if (name === 'list_pending_quotes')
       return stored.map((q) => ({ id: q.id, vehicle_class: q.vehicle_class, distance_m: 5000, duration_s: 600, base_cents: 200, distance_cents: 550, time_cents: 250, booking_fee_cents: 150, min_adjust_cents: 0, surge_milli: q.surge_milli, total_cents: q.total_cents, nearby_drivers: q.nearby_drivers, expires_at: q.expires_at }))
+    if (name === 'get_service_status') return [{ dispatch_paused: opts.paused ? 1 : 0 }]
     if (name === 'accept_quote') {
       if ((opts.outcome ?? 'accepted') === 'accepted') accepted = { quote_id: params.quote_id as string, ride_id: params.ride_id as string }
       return undefined
@@ -204,7 +205,7 @@ describe('NewRide (signed in: live quotes)', () => {
     await userEvent.type(screen.getByPlaceholderText('Where are you going?'), 'qqq')
     await userEvent.click(screen.getByRole('button', { name: 'Get quotes' }))
     expect(await screen.findByRole('alert')).toHaveTextContent(/couldn't find one of those addresses/)
-    expect(actions.call).not.toHaveBeenCalled()
+    expect(actions.call.mock.calls.filter((c) => c[0] === 'create_quote')).toEqual([])
   })
 
   it('never falls back to the simulated driver', async () => {
@@ -213,5 +214,23 @@ describe('NewRide (signed in: live quotes)', () => {
     await screen.findByRole('radio', { name: 'RideShare $11.50' })
     expect(screen.queryByText(/Estimate shown before booking/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Request RideShare · \$11\.80$/ })).not.toBeInTheDocument()
+  })
+
+  it('tells riders requests are paused, and does not let them price or request', async () => {
+    serve({ paused: true })
+    mount()
+    expect(await screen.findByRole('status')).toHaveTextContent('New ride requests are paused for a short time')
+    await userEvent.type(screen.getByPlaceholderText('Enter pickup'), 'Central')
+    await userEvent.type(screen.getByPlaceholderText('Where are you going?'), 'North')
+    expect(screen.getByRole('button', { name: 'Get quotes' })).toBeDisabled()
+  })
+
+  it('explains a refused request as a pause when dispatch was paused after the quote was shown', async () => {
+    serve({ outcome: 'superseded' })
+    actions.call.mockImplementation(((impl) => async (name: string, params: Record<string, unknown>) => (name === 'get_service_status' && actions.call.mock.calls.some((c) => c[0] === 'accept_quote') ? [{ dispatch_paused: 1 }] : impl(name, params)))(actions.call.getMockImplementation()!))
+    await fillAndQuote()
+    await userEvent.click(await screen.findByRole('button', { name: /Request RideShare · \$11\.50/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('New ride requests are paused')
+    expect(screen.getByRole('button', { name: /Refresh quotes/ })).toBeDisabled()
   })
 })

@@ -18,7 +18,8 @@ vi.mock('../lib/tripLifecycle', async (importOriginal) => ({
   ...api,
 }))
 
-const { earnings } = vi.hoisted(() => ({ earnings: { rows: [] as Record<string, unknown>[] } }))
+const { earnings, tel } = vi.hoisted(() => ({ earnings: { rows: [] as Record<string, unknown>[] }, tel: { reportError: vi.fn() } }))
+vi.mock('../lib/telemetry', async (importOriginal) => ({ ...(await importOriginal<typeof import('../lib/telemetry')>()), reportError: tel.reportError }))
 vi.mock('../lib/receipts', async (importOriginal) => ({ ...(await importOriginal<typeof import('../lib/receipts')>()), loadEarnings: async () => earnings.rows }))
 
 import DriverTrip from './DriverTrip'
@@ -28,6 +29,7 @@ const trip = (extra: Record<string, unknown> = {}) => ({ tripId: 'r1:trip', requ
 const mount = () => render(renderWithRouter(<DriverTrip riderId="rider-1" rideId="r1" />, '/driver/trip/rider-1/r1').ui)
 
 beforeEach(() => {
+  tel.reportError.mockReset()
   earnings.rows = []
   current.trip = trip()
   Object.values(api).forEach((f) => f.mockClear())
@@ -167,6 +169,64 @@ describe('DriverTrip', () => {
       mount()
       expect(await screen.findByText(/User denied Geolocation. The rider can't see you/)).toBeInTheDocument()
       expect(publishLocation).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('observability', () => {
+    it('raises a transition error when a legal step leaves the trip where it was', async () => {
+      current.trip = trip({ phase: 'scheduled' }) // the server "did nothing": the reload still says scheduled
+      mount()
+      await userEvent.click(await screen.findByRole('button', { name: 'Start driving to pickup' }))
+      await waitFor(() => expect(tel.reportError).toHaveBeenCalled())
+      expect(tel.reportError).toHaveBeenCalledWith({ domain: 'transition', code: 'step_rejected', severity: 'error', action: 'advance_trip', tripId: 'r1:trip', requestId: 'r1', detail: 'expected en_route, got scheduled' })
+    })
+
+    it('says nothing when the step took effect', async () => {
+      current.trip = trip({ phase: 'scheduled' })
+      api.driverStep.mockImplementationOnce(async () => { current.trip = trip({ phase: 'en_route' }) })
+      mount()
+      await userEvent.click(await screen.findByRole('button', { name: 'Start driving to pickup' }))
+      await screen.findByText('Driving to pickup')
+      expect(tel.reportError).not.toHaveBeenCalledWith(expect.objectContaining({ domain: 'transition' }))
+    })
+
+    it('only warns when someone else already ended the trip', async () => {
+      current.trip = trip({ phase: 'arrived' })
+      api.driverStep.mockImplementationOnce(async () => { current.trip = trip({ phase: 'cancelled', outcome: 'rider_cancelled' }) })
+      mount()
+      await userEvent.click(await screen.findByRole('button', { name: 'Start trip' }))
+      await waitFor(() => expect(tel.reportError).toHaveBeenCalled())
+      expect(tel.reportError).toHaveBeenCalledWith(expect.objectContaining({ code: 'step_superseded', severity: 'warn', action: 'start_trip' }))
+    })
+
+    it('checks cancellation and the rider no-show the same way', async () => {
+      current.trip = trip({ phase: 'en_route' })
+      mount()
+      await userEvent.click(await screen.findByRole('button', { name: 'Cancel trip' }))
+      await userEvent.click(screen.getByRole('button', { name: 'Confirm cancellation' }))
+      await waitFor(() => expect(tel.reportError).toHaveBeenCalledWith(expect.objectContaining({ code: 'step_rejected', action: 'driver_cancel_trip', detail: 'expected cancelled, got en_route' })))
+    })
+
+    it('reports location that cannot be read, so tracking alerts have something to count', async () => {
+      geo.watch.mockImplementation((_ok: unknown, fail: (e: { message: string }) => void) => { fail({ message: 'User denied Geolocation' }); return 1 })
+      current.trip = trip({ phase: 'en_route' })
+      mount()
+      await waitFor(() => expect(tel.reportError).toHaveBeenCalledWith(expect.objectContaining({ domain: 'tracking', code: 'location_unavailable', severity: 'warn', tripId: 'r1:trip' })))
+    })
+
+    it('reports sharing that keeps failing', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        publishLocation.mockRejectedValue(new Error('network'))
+        // a fix every second, as a phone would deliver them
+        geo.watch.mockImplementation((ok: (p: unknown) => void) => { setInterval(() => ok({ coords: { latitude: -33.87, longitude: 151.21, accuracy: 7, speed: 9 } }), 1000); return 1 })
+        current.trip = trip({ phase: 'en_route' })
+        mount()
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect(tel.reportError).toHaveBeenCalledWith({ domain: 'tracking', code: 'publish_failing', severity: 'error', tripId: 'r1:trip', requestId: 'r1' })
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 })

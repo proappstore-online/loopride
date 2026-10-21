@@ -1,6 +1,6 @@
 import type { LatLng } from '../types'
-
-const PAS_API = 'https://api.proappstore.online'
+import { app } from './app'
+import { timed } from './telemetry'
 
 export interface GeocodeMatch {
   lat: number
@@ -9,29 +9,20 @@ export interface GeocodeMatch {
 }
 
 /**
- * Geocode a text query through the PAS Maps API. Accepts an AbortSignal so
- * a stale request (older debounced keystroke) gets cancelled cleanly when a
- * newer one fires — avoids burning Nominatim quota and lets the latest
- * result always win.
- *
- * Direct fetch wrapper because @proappstore/sdk@1.5.x on npm doesn't yet
- * expose the signal option. Switch to app.maps.geocode(q, n, {signal}) once
- * the SDK is republished from pas/platform/.
+ * Geocode a text query through the PAS Maps API, using the SDK so the request carries the
+ * platform session (the endpoint rejects anonymous calls with 401). Accepts an AbortSignal so a
+ * stale request (older debounced keystroke) gets cancelled cleanly when a newer one fires.
+ * Failures are counted and reported (domain `maps`); a cancelled request is not a failure.
  */
 export async function geocode(
   query: string,
   limit = 5,
   opts?: { signal?: AbortSignal },
 ): Promise<GeocodeMatch[]> {
-  const url = new URL(`${PAS_API}/v1/maps/geocode`)
-  url.searchParams.set('q', query)
-  url.searchParams.set('limit', String(limit))
-  const response = await fetch(url.toString(), opts?.signal ? { signal: opts.signal } : undefined)
-  if (!response.ok) throw new Error(`geocode failed: ${response.status}`)
-  const data = (await response.json()) as {
-    results: Array<{ lat: number; lng: number; displayName: string }>
-  }
-  return data.results.map((r) => ({ lat: r.lat, lng: r.lng, displayName: r.displayName }))
+  return timed('maps', 'geocode_failed', async () => {
+    const results = await app.maps.geocode(query, limit, opts?.signal ? { signal: opts.signal } : undefined)
+    return results.map((r) => ({ lat: r.lat, lng: r.lng, displayName: r.displayName }))
+  })
 }
 
 /** Single best match for an address. null if no result. */

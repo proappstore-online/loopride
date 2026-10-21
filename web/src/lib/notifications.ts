@@ -1,4 +1,5 @@
 import { app } from './app'
+import { recordCall, reportError } from './telemetry'
 
 /**
  * Notifications. The server (mcp.json) decides who is told what, in the same
@@ -190,6 +191,7 @@ export async function deliverPending(origin: string = typeof window === 'undefin
       const payload = { title: text.title, body: text.body, url: `${origin}${row.link}`, tag: row.id }
       let outcome: 'sent' | 'failed' | 'skipped' = 'failed'
       let error = ''
+      const started = Date.now()
       try {
         const r = await app.notifications.notifyUser(row.recipient, payload, { channel: row.channel })
         if (row.channel === 'push') {
@@ -203,6 +205,9 @@ export async function deliverPending(origin: string = typeof window === 'undefin
       } catch (e) {
         error = e instanceof Error ? e.message : 'error'
       }
+      // Skipped (the recipient unsubscribed) is a normal answer; only real failures count against the service.
+      recordCall('notification', outcome !== 'failed', Date.now() - started)
+      if (outcome === 'failed') reportError({ domain: 'notification', code: row.channel === 'push' ? 'push_not_delivered' : 'email_not_delivered', severity: 'warn', detail: error })
       try {
         await call(row.channel === 'push' ? 'report_push_result' : 'report_email_result', { recipient: row.recipient, notification_id: row.id, outcome, error: error || null })
       } catch {

@@ -3,14 +3,18 @@ import { render, screen, waitFor } from '@testing-library/react'
 import { renderWithRouter } from '../../test/router'
 import userEvent from '@testing-library/user-event'
 
-const { actions } = vi.hoisted(() => ({ actions: { call: vi.fn() } }))
+const { actions, tel } = vi.hoisted(() => ({ actions: { call: vi.fn() }, tel: { reportError: vi.fn() } }))
+vi.mock('../lib/telemetry', async (importOriginal) => ({ ...(await importOriginal<typeof import('../lib/telemetry')>()), reportError: tel.reportError }))
 vi.mock('../lib/app', () => ({ app: { actions } }))
 
 import DriverOffers from './DriverOffers'
 
 const offer = (status: string, extra = {}) => ({ rider_id: 'u', request_id: 'r1', status, distance_km2: 4, expires_at: Date.now() + 20_000, pickup_label: 'Central', dropoff_label: 'Airport', vehicle_class: null, fare_cents: 1500, ...extra })
 
-beforeEach(() => actions.call.mockReset())
+beforeEach(() => {
+  actions.call.mockReset()
+  tel.reportError.mockReset()
+})
 
 describe('DriverOffers', () => {
   it('renders nothing without an offer', async () => {
@@ -53,5 +57,24 @@ describe('DriverOffers', () => {
     const { container } = render(renderWithRouter(<DriverOffers />).ui)
     await waitFor(() => expect(actions.call).toHaveBeenCalled())
     expect(container).toBeEmptyDOMElement()
+  })
+
+  it('records a lost race as a warning, not an error', async () => {
+    actions.call.mockImplementation(async (name: string) => (name === 'list_my_offers' ? [offer('offered')] : undefined)) // accept does nothing: the offer is still only "offered"
+    render(renderWithRouter(<DriverOffers />).ui)
+    await userEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    await waitFor(() => expect(tel.reportError).toHaveBeenCalledWith({ domain: 'transition', code: 'offer_lost', severity: 'warn', action: 'accept_offer', requestId: 'r1' }))
+  })
+
+  it('does not report an accept that worked', async () => {
+    let accepted = false
+    actions.call.mockImplementation(async (name: string) => {
+      if (name === 'accept_offer') accepted = true
+      return name === 'list_my_offers' ? [offer(accepted ? 'accepted' : 'offered')] : undefined
+    })
+    render(renderWithRouter(<DriverOffers />).ui)
+    await userEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    await screen.findByText(/Assigned to you/)
+    expect(tel.reportError).not.toHaveBeenCalled()
   })
 })

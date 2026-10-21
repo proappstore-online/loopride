@@ -13,12 +13,14 @@ import {
   driverStep,
   isFinished,
   loadDriverTrip,
+  type Phase,
   nextDriverStep,
   noShowWaitLeftMs,
   openDispute,
   reportRiderNoShow,
 } from '../lib/tripLifecycle'
 import { loadEarnings, money, type Earning } from '../lib/receipts'
+import { reportError } from '../lib/telemetry'
 
 const TripMap = lazy(() => import('./TripMap'))
 
@@ -49,7 +51,20 @@ export default function DriverTrip({ riderId, rideId }: Props) {
   const [health, setHealth] = useState<PublishHealth>('waiting')
   const [earning, setEarning] = useState<Earning | null>(null)
 
-  const refresh = useCallback(() => loadDriverTrip(riderId, tripId).then(setTrip, () => setTrip((t) => t ?? null)), [riderId, tripId])
+  const refresh = useCallback(
+    () =>
+      loadDriverTrip(riderId, tripId).then(
+        (t) => {
+          setTrip(t)
+          return t
+        },
+        () => {
+          setTrip((t) => t ?? null)
+          return undefined
+        },
+      ),
+    [riderId, tripId],
+  )
   useEffect(() => {
     void refresh()
     const poll = setInterval(refresh, POLL_MS)
@@ -81,7 +96,10 @@ export default function DriverTrip({ riderId, rideId }: Props) {
       setGeoError('Location is not available on this device')
       return
     }
-    const publisher = new LocationPublisher((fix) => publishDriverLocation(riderId, tripId, fix), setHealth)
+    const publisher = new LocationPublisher((fix) => publishDriverLocation(riderId, tripId, fix), (h) => {
+      setHealth(h)
+      if (h === 'failing') reportError({ domain: 'tracking', code: 'publish_failing', severity: 'error', tripId, requestId: rideId })
+    })
     const watch = navigator.geolocation.watchPosition(
       (pos) => {
         const here = { lat: pos.coords.latitude, lng: pos.coords.longitude }
@@ -89,7 +107,10 @@ export default function DriverTrip({ riderId, rideId }: Props) {
         setGeoError(null)
         publisher.push({ position: here, accuracyM: pos.coords.accuracy ?? null, speedMps: pos.coords.speed ?? null })
       },
-      (err) => setGeoError(err.message),
+      (err) => {
+        setGeoError(err.message)
+        reportError({ domain: 'tracking', code: 'location_unavailable', severity: 'warn', tripId, requestId: rideId, detail: err.message })
+      },
       { enableHighAccuracy: true, maximumAge: 1000, timeout: 10_000 },
     )
     return () => {
@@ -97,13 +118,22 @@ export default function DriverTrip({ riderId, rideId }: Props) {
       publisher.stop()
       setHealth('waiting')
     }
-  }, [driving, riderId, tripId])
+  }, [driving, riderId, tripId, rideId])
 
-  const act = async (run: () => Promise<unknown>, failure: string) => {
+  /**
+   * Run one trip action and confirm the server did it. The screen only offers legal steps, so a
+   * step that leaves the trip where it was is a real problem worth an alert (unless someone else
+   * already ended the trip, which is only a warning).
+   */
+  const act = async (run: () => Promise<unknown>, failure: string, action: string, expected: Phase) => {
     setBusy(true)
     try {
       await run()
-      await refresh()
+      const after = await refresh()
+      if (after && after.phase !== expected) {
+        const ended = isFinished(after.phase)
+        reportError({ domain: 'transition', code: ended ? 'step_superseded' : 'step_rejected', severity: ended ? 'warn' : 'error', action, tripId, requestId: rideId, detail: `expected ${expected}, got ${after.phase}` })
+      }
     } catch {
       showToast({ message: failure })
     } finally {
@@ -172,12 +202,12 @@ export default function DriverTrip({ riderId, rideId }: Props) {
 
         <div className="mt-5 flex flex-wrap gap-2">
           {step && (
-            <button disabled={busy} onClick={() => act(() => driverStep(step.run, riderId, tripId), "That step isn't available right now")} className="rounded-2xl bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-white disabled:opacity-50">{step.label}</button>
+            <button disabled={busy} onClick={() => act(() => driverStep(step.run, riderId, tripId), "That step isn't available right now", step.run === 'start' ? 'start_trip' : 'advance_trip', step.run === 'start' ? 'in_progress' : step.run)} className="rounded-2xl bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-white disabled:opacity-50">{step.label}</button>
           )}
           {phase === 'arrived' && (
             <button
               disabled={busy || !canReportRiderNoShow(trip, now)}
-              onClick={() => act(() => reportRiderNoShow(riderId, tripId), "Couldn't report the no-show")}
+              onClick={() => act(() => reportRiderNoShow(riderId, tripId), "Couldn't report the no-show", 'report_rider_no_show', 'cancelled')}
               className="rounded-2xl border border-[var(--line)] px-5 py-2 text-sm font-semibold text-[var(--ink)] disabled:opacity-50"
             >
               {canReportRiderNoShow(trip, now) ? "Rider didn't show" : `Rider no-show in ${mmss(noShowLeft)}`}
@@ -205,7 +235,7 @@ export default function DriverTrip({ riderId, rideId }: Props) {
             onClose={() => setPanel(null)}
             onSubmit={async (code, text) => {
               setPanel(null)
-              await act(() => driverCancel(riderId, tripId, code, text), "Couldn't cancel the trip")
+              await act(() => driverCancel(riderId, tripId, code, text), "Couldn't cancel the trip", 'driver_cancel_trip', 'cancelled')
             }}
           />
         )}
@@ -218,7 +248,7 @@ export default function DriverTrip({ riderId, rideId }: Props) {
             onClose={() => setPanel(null)}
             onSubmit={async (code, text) => {
               setPanel(null)
-              await act(() => openDispute(riderId, tripId, code, text), "Couldn't send your report")
+              await act(() => openDispute(riderId, tripId, code, text), "Couldn't send your report", 'open_dispute', phase ?? 'completed')
             }}
           />
         )}

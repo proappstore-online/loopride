@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
+import { reportError } from '../lib/telemetry'
 
 interface Props {
   children: ReactNode
@@ -17,6 +18,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error('App crashed:', error, info.componentStack)
+    reportError({ domain: 'request', code: 'render_crash', severity: 'error', error })
   }
 
   reset = (): void => {

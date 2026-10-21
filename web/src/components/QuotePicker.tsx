@@ -3,7 +3,7 @@ import type { LatLng, RecurringRide, VehicleType } from '../types'
 import { VEHICLES } from '../types'
 import { firstMatch } from '../lib/maps'
 import { fetchRoute } from '../lib/routing'
-import { acceptQuote, isEligible, isExpired, REASON_TEXT, requestQuotes, secondsLeft, surgeLabel, type Quote, type QuoteRoute } from '../lib/quotes'
+import { acceptQuote, dispatchPaused, isEligible, PAUSED_TEXT, isExpired, REASON_TEXT, requestQuotes, secondsLeft, surgeLabel, type Quote, type QuoteRoute } from '../lib/quotes'
 
 const usd = (cents: number) => `$${(cents / 100).toFixed(2)}`
 const km = (m: number) => `${(m / 1000).toFixed(1)} km`
@@ -30,6 +30,15 @@ export default function QuotePicker({ pickup, pickupCoord, dropoff, dropoffCoord
   const [busy, setBusy] = useState<'quoting' | 'requesting' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  const [paused, setPaused] = useState(false)
+
+  useEffect(() => {
+    let live = true
+    void dispatchPaused().then((p) => live && setPaused(p))
+    return () => {
+      live = false
+    }
+  }, [])
 
   // Any change to the trip invalidates what was quoted.
   const tripKey = `${pickup.trim()}|${dropoff.trim()}|${pickupCoord?.lat},${pickupCoord?.lng}|${dropoffCoord?.lat},${dropoffCoord?.lng}`
@@ -103,7 +112,9 @@ export default function QuotePicker({ pickup, pickupCoord, dropoff, dropoffCoord
     try {
       const result = await acceptQuote(chosen, route, rideId, ride)
       if (result.ok) return onAccepted(ride)
-      setError(REASON_TEXT[result.reason])
+      const nowPaused = await dispatchPaused()
+      setPaused(nowPaused)
+      setError(nowPaused ? PAUSED_TEXT : REASON_TEXT[result.reason])
       setQuotes((current) => current.filter((q) => q.id !== chosen.id).map((q) => ({ ...q, expiresAt: result.reason === 'expired' ? 0 : q.expiresAt })))
       setSelected(null)
     } catch {
@@ -115,7 +126,8 @@ export default function QuotePicker({ pickup, pickupCoord, dropoff, dropoffCoord
 
   return (
     <section aria-label="Quotes" className="space-y-4">
-      <button type="button" onClick={getQuotes} disabled={!ready || busy !== null} className="w-full rounded-2xl bg-[var(--ink)] px-5 py-4 text-sm font-extrabold text-white disabled:opacity-40">
+      {paused && <p role="status" className="rounded-xl bg-[var(--accent-soft)] px-4 py-3 text-xs font-semibold text-[var(--ink)]">{PAUSED_TEXT}</p>}
+      <button type="button" onClick={getQuotes} disabled={!ready || busy !== null || paused} className="w-full rounded-2xl bg-[var(--ink)] px-5 py-4 text-sm font-extrabold text-white disabled:opacity-40">
         {busy === 'quoting' ? 'Getting quotes…' : quotes.length > 0 ? 'Refresh quotes' : 'Get quotes'}
       </button>
 
@@ -173,7 +185,7 @@ export default function QuotePicker({ pickup, pickupCoord, dropoff, dropoffCoord
       {allExpired && !error && <p role="alert" className="rounded-xl bg-[#fff0ee] px-4 py-3 text-xs font-semibold text-[var(--error)]">Your quotes expired. Refresh to see current prices.</p>}
 
       {quotes.length > 0 && (
-        <button type="button" onClick={request} disabled={!chosen || chosenExpired || !isEligible(chosen) || busy !== null} className="w-full rounded-2xl bg-[var(--accent)] px-5 py-4 text-sm font-extrabold text-white shadow-sm disabled:opacity-40">
+        <button type="button" onClick={request} disabled={!chosen || chosenExpired || !isEligible(chosen) || busy !== null || paused} className="w-full rounded-2xl bg-[var(--accent)] px-5 py-4 text-sm font-extrabold text-white shadow-sm disabled:opacity-40">
           {busy === 'requesting' ? 'Requesting…' : chosen ? `Request ${VEHICLES.find((v) => v.id === chosen.vehicle)!.label} · ${usd(chosen.totalCents)}` : 'Choose a ride'}
         </button>
       )}

@@ -24,6 +24,7 @@ import {
 import { showToast } from '../lib/toast'
 import { loadReceipt, type Receipt } from '../lib/receipts'
 import ReceiptCard from '../components/ReceiptCard'
+import { reportError } from '../lib/telemetry'
 
 const TripMap = lazy(() => import('./TripMap'))
 
@@ -63,7 +64,17 @@ export default function Trip({ rideId }: TripProps) {
     return () => clearInterval(t)
   }, [])
 
-  const refreshTrip = useCallback(() => loadRiderTrip(rideId).then(setTrip, () => undefined), [rideId])
+  const refreshTrip = useCallback(
+    () =>
+      loadRiderTrip(rideId).then(
+        (t) => {
+          setTrip(t)
+          return t
+        },
+        () => undefined,
+      ),
+    [rideId],
+  )
 
   // Drive dispatch until it settles, then follow the trip the driver advances.
   useEffect(() => {
@@ -89,9 +100,23 @@ export default function Trip({ rideId }: TripProps) {
   useEffect(() => {
     if (!managed || !finished) return
     let live = true
-    loadReceipt(rideId).then((r) => live && setReceipt(r), () => undefined)
+    let retry: ReturnType<typeof setTimeout> | undefined
+    // The statement is written in the transaction that ends the trip, so it should be there at once.
+    // If it is not, try once more, then raise an alert: a finished trip with no receipt is a payments bug.
+    const attempt = (last: boolean) =>
+      loadReceipt(rideId).then(
+        (r) => {
+          if (!live) return
+          if (r) return setReceipt(r)
+          if (!last) retry = setTimeout(() => attempt(true), 3000)
+          else reportError({ domain: 'payment', code: 'receipt_missing', severity: 'error', tripId: `${rideId}:trip`, requestId: rideId })
+        },
+        () => undefined,
+      )
+    void attempt(false)
     return () => {
       live = false
+      if (retry) clearTimeout(retry)
     }
   }, [managed, finished, rideId, trip?.cancelFeeCents])
   const tracking = managed && (phase === 'en_route' || phase === 'arrived' || phase === 'in_progress')
@@ -230,7 +255,15 @@ export default function Trip({ rideId }: TripProps) {
           )}
           {trip && canReportDriverNoShow(trip, now) && (
             <button
-              onClick={() => reportDriverNoShow(rideId).then(refreshTrip, () => showToast({ message: "Couldn't send that report" }))}
+              onClick={() =>
+                reportDriverNoShow(rideId).then(
+                  () =>
+                    refreshTrip().then((after) => {
+                      if (after && !isFinished(after.phase)) reportError({ domain: 'transition', code: 'step_refused', severity: 'warn', action: 'report_driver_no_show', tripId: after.tripId, requestId: rideId, detail: `still ${after.phase}` })
+                    }),
+                  () => showToast({ message: "Couldn't send that report" }),
+                )
+              }
               className="rounded-2xl border border-[var(--line)] px-5 py-2 text-sm font-semibold text-[var(--error)]"
             >
               Driver hasn't arrived
@@ -252,7 +285,12 @@ export default function Trip({ rideId }: TripProps) {
             onDone={() => {
               setPanel(null)
               setDispatch((d) => (d ? { ...d, state: 'cancelled' } : d))
-              void refreshTrip()
+              const before = trip
+              void refreshTrip().then((after) => {
+                // Cancelling was offered, so a trip that is still open afterwards means the server refused a legal step.
+                if (before && canRiderCancel(before.phase) && after && !isFinished(after.phase))
+                  reportError({ domain: 'transition', code: 'step_rejected', severity: 'error', action: 'cancel_ride', tripId: before.tripId, requestId: rideId, detail: `expected cancelled, got ${after.phase}` })
+              })
             }}
           />
         )}

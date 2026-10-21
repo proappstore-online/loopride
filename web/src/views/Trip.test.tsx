@@ -30,6 +30,9 @@ vi.mock('../lib/tracking', async (importOriginal) => ({
 }))
 vi.mock('../lib/routing', () => ({ fetchRoute: (...args: unknown[]) => route.fn(...args) }))
 
+const { tel } = vi.hoisted(() => ({ tel: { reportError: vi.fn() } }))
+vi.mock('../lib/telemetry', async (importOriginal) => ({ ...(await importOriginal<typeof import('../lib/telemetry')>()), reportError: tel.reportError }))
+
 const { receipts } = vi.hoisted(() => ({ receipts: { current: null as Record<string, unknown> | null, load: vi.fn() } }))
 vi.mock('../lib/receipts', async (importOriginal) => ({ ...(await importOriginal<typeof import('../lib/receipts')>()), loadReceipt: (...args: unknown[]) => receipts.load(...args) }))
 
@@ -58,11 +61,16 @@ import { renderWithRouter } from '../../test/router'
 const legacy: RecurringRide = { id: 'ride-old', pickup: 'A', pickupCoord: { lat: 0, lng: 0 }, dropoff: 'B', dropoffCoord: { lat: 1, lng: 1 }, days: [], time: '08:00', driverName: 'Jordan', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'comfort', fareCents: 1711, etaMinutes: 5, driverPlate: 'RS-482', driverRating: 4.9 }
 const live: RecurringRide = { ...legacy, id: 'ride-live', driverName: '', driverPlate: undefined, driverRating: undefined, quoteId: 'q1' }
 const mount = (id: string) => render(renderWithRouter(<Trip rideId={id} />).ui)
+/** Move the fake clock on until the trip has loaded and the first receipt request has gone out. */
+const untilFirstReceiptRequest = async (load: { mock: { calls: unknown[] } }) => {
+  for (let i = 0; i < 100 && load.mock.calls.length < 1; i++) await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+}
 
 const lifecycle = (extra: Record<string, unknown> = {}) => ({ tripId: 'ride-live:trip', requestId: 'ride-live', phase: 'scheduled', startedAt: null, endedAt: null, outcome: null, cancelledByRole: null, cancelCode: null, cancelFeeCents: 0, feePolicy: null, assignedAt: Date.now(), arrivedAt: null, disputed: false, pickup: null, dropoff: null, ...extra })
 const matchedDispatch = { state: 'matched', attempts: 1, offerStatus: 'accepted', driverName: 'Dana', plate: 'RS-9' }
 
 beforeEach(() => {
+  tel.reportError.mockReset()
   receipts.current = null
   receipts.load.mockReset()
   receipts.load.mockImplementation(async () => receipts.current)
@@ -334,5 +342,72 @@ describe('Trip: server-driven rides', () => {
     await screen.findByText('Dana is on the way')
     expect(receipts.load).not.toHaveBeenCalled()
     expect(screen.queryByRole('region', { name: 'Receipt' })).not.toBeInTheDocument()
+  })
+
+  describe('observability', () => {
+    it('raises an alert when a finished trip has no receipt, after trying twice', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        dispatchState.current = matchedDispatch
+        tripState.current = lifecycle({ phase: 'completed' })
+        receipts.current = null
+        mount('ride-live')
+        await untilFirstReceiptRequest(receipts.load)
+        expect(receipts.load).toHaveBeenCalledTimes(1)
+        expect(tel.reportError).not.toHaveBeenCalled() // one more try first
+        await act(async () => { await vi.advanceTimersByTimeAsync(2900) })
+        expect(receipts.load).toHaveBeenCalledTimes(1) // the retry waits 3 seconds
+        await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+        expect(receipts.load).toHaveBeenCalledTimes(2)
+        expect(tel.reportError).toHaveBeenCalledWith({ domain: 'payment', code: 'receipt_missing', severity: 'error', tripId: 'ride-live:trip', requestId: 'ride-live' })
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('stays quiet when the receipt arrives on the second try', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        dispatchState.current = matchedDispatch
+        tripState.current = lifecycle({ phase: 'completed' })
+        receipts.load.mockResolvedValueOnce(null).mockResolvedValue({ receiptNo: 'RCT-1', tripId: 'ride-live:trip', requestId: 'ride-live', basis: 'fare', currency: 'USD', quotedCents: 1, baseCents: null, distanceCents: null, timeCents: null, bookingFeeCents: null, minAdjustCents: null, surgeMilli: null, finalCents: 1, taxRateBp: 0, taxCents: 0, creditsCents: 0, totalCents: 1, pickup: 'A', dropoff: 'B', finalizedAt: 1 })
+        mount('ride-live')
+        await untilFirstReceiptRequest(receipts.load)
+        await act(async () => { await vi.advanceTimersByTimeAsync(3100) })
+        expect(receipts.load).toHaveBeenCalledTimes(2)
+        expect(tel.reportError).not.toHaveBeenCalled()
+        expect(screen.getByRole('region', { name: 'Receipt' })).toBeInTheDocument()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('raises a transition error when cancelling a legal trip leaves it open', async () => {
+      dispatchState.current = matchedDispatch
+      tripState.current = lifecycle({ phase: 'en_route' }) // the server "did nothing"
+      mount('ride-live')
+      await userEvent.click(await screen.findByRole('button', { name: 'Cancel ride' }))
+      await userEvent.click(await screen.findByRole('button', { name: 'Confirm cancellation' }))
+      await waitFor(() => expect(tel.reportError).toHaveBeenCalledWith({ domain: 'transition', code: 'step_rejected', severity: 'error', action: 'cancel_ride', tripId: 'ride-live:trip', requestId: 'ride-live', detail: 'expected cancelled, got en_route' }))
+    })
+
+    it('does not alert on a cancellation that worked', async () => {
+      dispatchState.current = matchedDispatch
+      tripState.current = lifecycle({ phase: 'en_route' })
+      api.cancelRide.mockImplementationOnce(async () => { tripState.current = lifecycle({ phase: 'cancelled', outcome: 'rider_cancelled' }) })
+      mount('ride-live')
+      await userEvent.click(await screen.findByRole('button', { name: 'Cancel ride' }))
+      await userEvent.click(await screen.findByRole('button', { name: 'Confirm cancellation' }))
+      await screen.findByText('You cancelled this ride')
+      expect(tel.reportError).not.toHaveBeenCalled()
+    })
+
+    it('only warns when a driver no-show report is refused', async () => {
+      dispatchState.current = matchedDispatch
+      tripState.current = lifecycle({ phase: 'en_route', assignedAt: Date.now() - 16 * 60_000 })
+      mount('ride-live')
+      await userEvent.click(await screen.findByRole('button', { name: "Driver hasn't arrived" }))
+      await waitFor(() => expect(tel.reportError).toHaveBeenCalledWith(expect.objectContaining({ code: 'step_refused', severity: 'warn', action: 'report_driver_no_show' })))
+    })
   })
 })

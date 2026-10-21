@@ -1,0 +1,46 @@
+name: Health check
+
+# A synthetic probe from outside the app. A failing run emails the repository's watchers.
+#  - the site serves the app shell;
+#  - the PAS API answers;
+#  - the tools registered on the platform match the committed mcp.json (a deploy whose tool
+#    registration failed leaves the live app on the old actions, which broke #9 until it was fixed).
+# In-app problems (matching, tracking, notifications, inconsistent trips) are caught by the alerts
+# in the operations console's Health tab. Maps need a signed-in session, so they are covered by
+# those alerts, not here. See docs/runbooks/README.md.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Site is up and serves the app
+        run: |
+          set -euo pipefail
+          body=$(curl -fsS --max-time 20 --retry 2 --retry-delay 5 https://loopride.proappstore.online/)
+          echo "$body" | grep -q 'id="root"' || { echo "::error::The site responded but is not serving the app shell"; exit 1; }
+      - name: PAS API is up
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 20 --retry 2 --retry-delay 5 https://api.proappstore.online/health | jq -e '.ok == true' > /dev/null \
+            || { echo "::error::The PAS API health check failed"; exit 1; }
+      - name: Registered tools match mcp.json
+        run: |
+          set -euo pipefail
+          expected=$(jq -r '.tools[].name' mcp.json | sort)
+          registered() { curl -fsS --max-time 20 --retry 2 --retry-delay 5 https://api.proappstore.online/v1/apps/loopride/tools | jq -r '.tools[].name' | sort; }
+          if [ "$(registered)" != "$expected" ]; then
+            # A deploy may be in progress (the commit just landed); give it time before calling it a failure.
+            sleep 240
+            actual=$(registered)
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::Registered tools differ from mcp.json. Missing: $(comm -23 <(echo "$expected") <(echo "$actual") | tr '\n' ' ') Unexpected: $(comm -13 <(echo "$expected") <(echo "$actual") | tr '\n' ' ')"
+              exit 1
+            fi
+          fi

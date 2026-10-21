@@ -125,3 +125,15 @@ export async function acceptQuote(quote: Quote, route: QuoteRoute, rideId: strin
   if (row?.status === 'superseded') return { ok: false, reason: 'changed' }
   return { ok: false, reason: 'unavailable' }
 }
+
+/** Whether operations have paused new ride requests (an outage lever). Unknown counts as running. */
+export async function dispatchPaused(): Promise<boolean> {
+  try {
+    const [row] = await call<{ dispatch_paused: number }[]>('get_service_status')
+    return row?.dispatch_paused === 1
+  } catch {
+    return false
+  }
+}
+
+export const PAUSED_TEXT = 'New ride requests are paused for a short time while we fix a problem. Please try again in a few minutes.'

@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useLocation } from 'wouter'
 import { useAuth } from '../lib/useAuth'
-import { hasRole } from '../lib/opsConsole'
+import { hasRole, loadAlerts } from '../lib/opsConsole'
 import DriversPanel from './ops/DriversPanel'
+import HealthPanel from './ops/HealthPanel'
 import TripsPanel from './ops/TripsPanel'
 import { AuditPanel, DisputesPanel, EscalationsPanel, RefundsPanel } from './ops/QueuePanels'
 
@@ -13,6 +14,7 @@ const TABS = [
   { id: 'refunds', label: 'Refunds' },
   { id: 'escalations', label: 'Escalations' },
   { id: 'audit', label: 'Audit' },
+  { id: 'health', label: 'Health' },
 ] as const
 type Tab = (typeof TABS)[number]['id']
 
@@ -26,12 +28,32 @@ export default function Ops() {
   const [, setLocation] = useLocation()
   const [role, setRole] = useState<{ ops: boolean; pii: boolean } | null>(null)
   const [tab, setTab] = useState<Tab>('trips')
+  const [firing, setFiring] = useState(0)
+  const [critical, setCritical] = useState(false)
 
   useEffect(() => {
     if (auth.loading) return
     if (!auth.user) return setRole({ ops: false, pii: false })
     Promise.all([hasRole('ops'), hasRole('ops_pii')]).then(([ops, pii]) => setRole({ ops, pii }))
   }, [auth.loading, auth.user])
+
+  // Keep an eye on health from every tab: a count on the Health tab means something needs attention.
+  const watch = useCallback(async () => {
+    try {
+      const firingNow = (await loadAlerts(15)).filter((a) => a.firing === 1)
+      setFiring(firingNow.length)
+      setCritical(firingNow.some((a) => a.severity === 'critical'))
+    } catch {
+      setFiring(-1)
+    }
+  }, [])
+  const isOps = role?.ops === true
+  useEffect(() => {
+    if (!isOps) return
+    void watch()
+    const t = setInterval(watch, 60_000)
+    return () => clearInterval(t)
+  }, [isOps, watch])
 
   if (role === null) return null
   if (!role.ops) {
@@ -51,7 +73,7 @@ export default function Ops() {
       </header>
       <div role="tablist" aria-label="Console sections" className="flex flex-wrap gap-2">
         {TABS.map((t) => (
-          <button key={t.id} role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)} className={`rounded-full border px-3 py-1 text-xs font-bold ${tab === t.id ? 'border-[var(--ink)] bg-[var(--ink)] text-white' : 'border-[var(--line)] text-[var(--ink)]'}`}>{t.label}</button>
+          <button key={t.id} role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)} className={`rounded-full border px-3 py-1 text-xs font-bold ${tab === t.id ? 'border-[var(--ink)] bg-[var(--ink)] text-white' : 'border-[var(--line)] text-[var(--ink)]'}`}>{t.label}{t.id === 'health' && firing !== 0 && <span className={`ml-1 rounded-full px-1.5 text-[10px] ${critical || firing < 0 ? 'bg-[var(--error)] text-white' : 'bg-[var(--accent)] text-white'}`}>{firing < 0 ? '!' : firing}</span>}</button>
         ))}
       </div>
       {tab === 'trips' && <TripsPanel canSeePii={role.pii} />}
@@ -60,6 +82,7 @@ export default function Ops() {
       {tab === 'refunds' && <RefundsPanel />}
       {tab === 'escalations' && <EscalationsPanel />}
       {tab === 'audit' && <AuditPanel />}
+      {tab === 'health' && <HealthPanel />}
     </div>
   )
 }

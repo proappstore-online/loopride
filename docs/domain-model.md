@@ -519,6 +519,30 @@ trail (they hold ids, codes and staff notes, not trip content).
 put it there but nothing checks. There is no ticketing, assignment or SLA tracking. Dispute
 and refund queues have no search. Executing an approved refund waits on payments (ADR 0001).
 
+## Observability and reliability (issue #15)
+
+Migration `0012_observability`: `client_events` (structured errors, 14 days), `client_metrics`
+(per-minute counters), `service_flag_log` (the append-only dispatch pause switch). Client:
+`lib/telemetry.ts` (installed in `lib/app.ts`: every platform action is counted, timed and its
+failures reported), `views/ops/HealthPanel.tsx`. The whole picture, with the alert thresholds, is in
+[`runbooks/README.md`](runbooks/README.md); the retry and idempotency behaviour of every external call
+is in [`reliability.md`](reliability.md); the incident procedures are the runbooks for a
+[dispatch](runbooks/dispatch-outage.md), [map](runbooks/map-outage.md) and
+[notification](runbooks/notification-outage.md) outage and for [rollback](runbooks/rollback.md).
+
+Recorded: seven areas (requests, dispatch, tracking, notifications, payments, maps, trip
+transitions). Errors carry only opaque trip/ride ids, action names, status and timings; free text is
+redacted and clipped. Alerts are SQL checks over a window: matching failures, offer timeouts, stale and
+degraded tracking, inconsistent trip/ride/offer states (critical), rejected trip steps (critical),
+failed and undelivered notifications, fare-statement problems, per-area error rate. Health shows
+them with a link to the runbook, and the operations switch can pause new ride requests during an outage.
+An outside probe (`.github/workflows/health-check.yml`, every 15 minutes) checks the site, the platform,
+and that the registered tools match `mcp.json`. **Known gap:** in-app alerts are read on the Health tab;
+nothing pages anyone, because the app has no server-side sender.
+
+While adding this, geocoding and routing were found to be calling the Maps API with a plain `fetch`
+that carries no session, which the API rejects with 401; they now use the SDK (`app.maps`).
+
 ## Migrating legacy rides
 
 Existing rides live in localStorage (`loopride.rides.v2`, which already absorbs

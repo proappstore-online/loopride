@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useLocation } from 'wouter'
 import { acceptOffer, declineOffer, loadOffers, type Offer } from '../lib/dispatch'
 import { showToast } from '../lib/toast'
+import { reportError } from '../lib/telemetry'
 
 const POLL_MS = 5000
 
@@ -28,7 +29,11 @@ export default function DriverOffers() {
       if (accept) {
         const fresh = await loadOffers()
         setOffers(fresh)
-        if (!fresh.some((o) => o.requestId === offer.requestId && o.status === 'accepted')) showToast({ message: 'That request is no longer available' })
+        if (!fresh.some((o) => o.requestId === offer.requestId && o.status === 'accepted')) {
+          showToast({ message: 'That request is no longer available' })
+          // Offers expire and riders cancel, so losing the race is normal; a spike of them is not.
+          reportError({ domain: 'transition', code: 'offer_lost', severity: 'warn', action: 'accept_offer', requestId: offer.requestId })
+        }
         return
       }
       await refresh()

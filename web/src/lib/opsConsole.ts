@@ -182,3 +182,29 @@ export const resolveEscalation = (id: string, note: string) => call('ops_resolve
 
 export interface AuditEntry { at: number; action: string; actor_id: string; rider_id: string | null; trip_id: string | null; driver_user_id: string | null; reason_code: string | null; note: string | null; amount_cents: number | null }
 export const listAudit = (tripId: string, actor: string) => call<AuditEntry[]>('ops_list_audit', { trip_id: tripId.trim() || null, actor: actor.trim() || null, limit: 100 })
+
+// ---- health ----
+export interface HealthAlert { code: string; domain: string; severity: 'critical' | 'warning'; firing: number; value: number; threshold: string; message: string; runbook: string }
+export interface HealthMetric { domain: string; calls: number; errors: number; slow: number; avg_latency_ms: number; people: number; gauge_a: number | null; gauge_b: number | null }
+export interface Invariant { ref: string; code: string; detail: string }
+export interface ErrorGroup { domain: string; code: string; severity: string; n: number; people: number; last_at: number; sample_trip: string | null; action: string | null; status: number | null }
+
+export const loadAlerts = (windowMin: number) => call<HealthAlert[]>('ops_health_alerts', { window_min: windowMin })
+export const loadMetrics = (windowMin: number) => call<HealthMetric[]>('ops_health_metrics', { window_min: windowMin })
+export const loadInvariants = () => call<Invariant[]>('ops_health_invariants', { limit: 100 })
+export const loadErrors = (windowMin: number) => call<ErrorGroup[]>('ops_health_errors', { window_min: windowMin, domain: null })
+
+export const PAUSE_REASONS: Reason[] = [
+  { code: 'dispatch_outage', label: 'Dispatch outage' },
+  { code: 'maintenance', label: 'Maintenance' },
+  { code: 'incident', label: 'Incident' },
+]
+export const setDispatchPaused = (paused: boolean, reasonCode: string, note: string) =>
+  call('ops_set_service_flag', { name: 'dispatch', paused: paused ? 1 : 0, reason_code: paused ? reasonCode : 'resolved', note: note.trim() })
+export async function isDispatchPaused(): Promise<boolean> {
+  const [row] = await call<{ dispatch_paused: number }[]>('get_service_status')
+  return row?.dispatch_paused === 1
+}
+
+/** Where the runbooks live (rendered by GitHub). */
+export const RUNBOOK_URL = (name: string) => `https://github.com/proappstore-online/loopride/blob/main/docs/runbooks/${name}.md`

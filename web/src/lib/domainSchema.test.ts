@@ -2871,3 +2871,410 @@ describe('operations console', () => {
     })
   })
 })
+
+describe('observability: events, metrics, alerts, invariants, dispatch switch', () => {
+  let db: Db
+  const NOW = Date.UTC(2026, 5, 1)
+  const MIN = 60_000
+  const SYDNEY = { lat: -33.8688, lng: 151.2093 }
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const as = (user: string, name: string, params: Record<string, unknown> = {}, now = NOW) => call(db, name, params, user, now)
+  const makeDriver = (id: string) => {
+    as(id, 'save_driver_application', { full_name: id, phone: '1', licence_number: id, licence_region: 'NSW', licence_expires: '2030-01-01', eligibility_confirmed: 1 })
+    as(id, 'save_driver_vehicle', { vehicle_id: `v-${id}`, plate: id, make: 'T', model: 'C', vehicle_class: 'share' })
+    as(id, 'submit_driver_application')
+    as('ops', 'review_driver_application', { driver_user_id: id, decision: 'approved' })
+    as(id, 'update_driver_location', { ...SYDNEY, service_radius_km: 10 })
+    as(id, 'set_driver_availability', { available: 1, vehicle_id: `v-${id}` })
+  }
+  const ride = (id: string) => rideToRecords({ id, pickup: 'A', pickupCoord: SYDNEY, dropoff: 'B', dropoffCoord: null, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share', fareCents: 1500 })
+  const request = (id: string, rider: string, now = NOW) => {
+    as(rider, 'save_ride', { ...ride(id) }, now)
+    as(rider, 'request_dispatch', { request_id: id }, now)
+  }
+  const matched = (id = 'r1', rider = 'rider-1', driver = 'd1') => {
+    if (!db.prepare('SELECT 1 FROM drivers WHERE user_id = ?').get(driver)) makeDriver(driver)
+    db.prepare('UPDATE driver_availability SET available = CASE WHEN user_id = ? THEN 1 ELSE 0 END').run(driver)
+    request(id, rider)
+    as(rider, 'dispatch_tick', { request_id: id })
+    as(driver, 'accept_offer', { rider_id: rider, request_id: id })
+  }
+  const trip = (id = 'r1', rider = 'rider-1') => ({ rider_id: rider, trip_id: `${id}:trip` })
+  const step = (to: string, id = 'r1', rider = 'rider-1', driver = 'd1', now = NOW) => as(driver, 'advance_trip', { ...trip(id, rider), to_status: to }, now)
+  const complete = (id = 'r1', rider = 'rider-1', driver = 'd1') => { step('en_route', id, rider, driver); step('arrived', id, rider, driver); as(driver, 'start_trip', trip(id, rider)); step('completed', id, rider, driver) }
+  /** A search nobody answered: no drivers online, ticked after the 2 minute window. */
+  const unanswered = (id: string, rider: string, at = NOW) => { request(id, rider, at); as(rider, 'dispatch_tick', { request_id: id }, at + 121_000) }
+  const alerts = (now = NOW, windowMin?: number) => as('ops', 'ops_health_alerts', windowMin ? { window_min: windowMin } : {}, now) as { code: string; domain: string; severity: string; firing: number; value: number; threshold: string; message: string; runbook: string }[]
+  const firing = (now = NOW, windowMin?: number) => alerts(now, windowMin).filter((a) => a.firing === 1).map((a) => a.code)
+  const alert = (code: string, now = NOW) => alerts(now).find((a) => a.code === code)!
+  const event = (user: string, extra: Record<string, unknown> = {}, now = NOW) => as(user, 'report_client_event', { domain: 'dispatch', code: 'accept_failed', severity: 'error', ...extra }, now)
+  const events = () => db.prepare('SELECT * FROM client_events ORDER BY at, id').all() as Record<string, unknown>[]
+  const metrics = (user: string, rows: unknown, now = NOW) => as(user, 'report_client_metrics', { payload: JSON.stringify(rows) }, now)
+  const invariants = () => as('ops', 'ops_health_invariants') as { ref: string; code: string; detail: string }[]
+
+  describe('roles', () => {
+    it('every health tool is ops-only; reporting tools are open to any signed-in user', () => {
+      for (const name of ['ops_health_alerts', 'ops_health_metrics', 'ops_health_invariants', 'ops_health_errors', 'ops_list_client_events', 'ops_set_service_flag'])
+        expect(tool(name), name).toMatchObject({ auth: { required: true, app_roles: ['ops'] } })
+      for (const name of ['report_client_event', 'report_client_metrics', 'get_service_status']) expect((tool(name) as unknown as { auth?: unknown }).auth, name).toBeUndefined()
+    })
+  })
+
+  describe('structured events', () => {
+    it('stores a non-personal event with its domain, code, action, status, latency, ids and detail', () => {
+      event('rider-1', { domain: 'tracking', code: 'publish_failed', action: 'publish_driver_location', status: 503, latency_ms: 2400, trip_id: 'r1:trip', request_id: 'r1', detail: 'network error' }, NOW + 5)
+      expect(events()).toMatchObject([{ user_id: 'rider-1', at: NOW + 5, domain: 'tracking', code: 'publish_failed', action: 'publish_driver_location', status: 503, latency_ms: 2400, trip_id: 'r1:trip', request_id: 'r1', severity: 'error', detail: 'network error' }])
+    })
+
+    it('drops events with an unknown domain or severity, or a malformed code, status or latency', () => {
+      event('u', { domain: 'billing' }); event('u', { severity: 'fatal' })
+      for (const code of ['Bad', 'has space', 'ab', 'x'.repeat(41), 'dash-es', 'digits1']) event('u', { code })
+      event('u', { status: 1000 }); event('u', { status: -1 }); event('u', { latency_ms: -5 }); event('u', { latency_ms: 3_600_001 })
+      expect(events()).toEqual([])
+      event('u', { code: 'ok_code', status: 999, latency_ms: 3_600_000 })
+      expect(events()).toHaveLength(1)
+    })
+
+    it('clips long fields', () => {
+      event('u', { detail: 'x'.repeat(500), action: 'a'.repeat(200), trip_id: 't'.repeat(300) })
+      expect(events()[0]).toMatchObject({ detail: 'x'.repeat(200), action: 'a'.repeat(60), trip_id: 't'.repeat(80) })
+    })
+
+    it('allows 20 events a minute per person, then resumes, and one person cannot use up another\'s allowance', () => {
+      for (let i = 0; i < 25; i++) event('noisy', {}, NOW + i * 100)
+      expect(events().filter((e) => e.user_id === 'noisy')).toHaveLength(20)
+      event('quiet', {}, NOW + 3000)
+      expect(events().filter((e) => e.user_id === 'quiet')).toHaveLength(1)
+      event('noisy', {}, NOW + MIN + 2600)
+      expect(events().filter((e) => e.user_id === 'noisy')).toHaveLength(21)
+    })
+
+    it('purges events older than 14 days whenever one is reported', () => {
+      event('u', {}, NOW)
+      event('u', {}, NOW + 14 * 24 * 60 * MIN + 1)
+      expect(events()).toHaveLength(1)
+    })
+
+    it('groups errors by domain and code with how many people hit them, and never says who', () => {
+      for (const u of ['a', 'b', 'c']) event(u, { code: 'accept_failed', trip_id: 'r1:trip' }, NOW + 1)
+      event('a', { code: 'accept_failed' }, NOW + 2)
+      event('a', { domain: 'maps', code: 'route_failed', severity: 'warn' }, NOW + 3)
+      const grouped = as('ops', 'ops_health_errors', {}, NOW + 10) as Record<string, unknown>[]
+      expect(grouped).toMatchObject([{ domain: 'dispatch', code: 'accept_failed', severity: 'error', n: 4, people: 3, sample_trip: 'r1:trip' }, { domain: 'maps', code: 'route_failed', severity: 'warn', n: 1, people: 1 }])
+      expect(JSON.stringify(grouped)).not.toMatch(/"user_id"|"a"|"b"/)
+      expect(as('ops', 'ops_health_errors', { domain: 'maps' }, NOW + 10)).toHaveLength(1)
+      expect(as('ops', 'ops_health_errors', {}, NOW + 40 * MIN)).toEqual([]) // outside the 15 minute window
+    })
+
+    it('lists the events for one trip or ride, oldest first', () => {
+      event('u', { code: 'first_try', trip_id: 'r1:trip', request_id: 'r1' }, NOW + 1)
+      event('u', { code: 'second_try', request_id: 'r1' }, NOW + 2)
+      event('u', { code: 'other_trip', trip_id: 'r9:trip' }, NOW + 3)
+      expect((as('ops', 'ops_list_client_events', { ref: 'r1' }) as { code: string }[]).map((e) => e.code)).toEqual(['first_try', 'second_try'])
+      expect((as('ops', 'ops_list_client_events', { ref: 'r1:trip' }) as { code: string }[]).map((e) => e.code)).toEqual(['first_try'])
+    })
+
+    it('are erased with the person\'s account data', () => {
+      event('u'); metrics('u', [{ d: 'dispatch', c: 5, e: 0, s: 0, l: 100 }])
+      as('u', 'delete_my_driver_data')
+      expect(count(db, 'client_events')).toBe(0)
+      expect(count(db, 'client_metrics')).toBe(0)
+    })
+  })
+
+  describe('metrics', () => {
+    const rows = () => db.prepare('SELECT user_id, minute, domain, calls, errors, slow, latency_sum_ms FROM client_metrics ORDER BY domain').all()
+
+    it('stores per-minute counters and adds repeated reports for the same minute', () => {
+      metrics('u', [{ d: 'dispatch', c: 10, e: 1, s: 2, l: 5000 }, { d: 'maps', c: 4, e: 0, s: 0, l: 800 }])
+      metrics('u', [{ d: 'dispatch', c: 5, e: 2, s: 0, l: 1000 }], NOW + 30_000)
+      expect(rows()).toEqual([
+        { user_id: 'u', minute: Math.floor(NOW / MIN), domain: 'dispatch', calls: 15, errors: 3, slow: 2, latency_sum_ms: 6000 },
+        { user_id: 'u', minute: Math.floor(NOW / MIN), domain: 'maps', calls: 4, errors: 0, slow: 0, latency_sum_ms: 800 },
+      ])
+    })
+
+    it('drops unknown domains and impossible numbers, and ignores malformed or oversized payloads', () => {
+      metrics('u', [{ d: 'billing', c: 1, e: 0, s: 0, l: 1 }, { d: 'dispatch', c: 5, e: 6, s: 0, l: 1 }, { d: 'dispatch', c: 5, e: 0, s: 6, l: 1 }, { d: 'dispatch', c: 0, e: 0, s: 0, l: 0 }, { d: 'dispatch', c: 1, e: 0, s: 0, l: -1 }])
+      as('u', 'report_client_metrics', { payload: 'not json' })
+      as('u', 'report_client_metrics', { payload: JSON.stringify(Array.from({ length: 200 }, () => ({ d: 'dispatch', c: 1, e: 0, s: 0, l: 1 }))) })
+      expect(rows()).toEqual([])
+      metrics('u', [{ d: 'dispatch', c: 1, e: 1, s: 1, l: 1 }])
+      expect(rows()).toHaveLength(1)
+    })
+
+    it('summarises calls, failures, slow calls, latency and people per domain', () => {
+      metrics('a', [{ d: 'dispatch', c: 10, e: 2, s: 1, l: 5000 }])
+      metrics('b', [{ d: 'dispatch', c: 10, e: 0, s: 0, l: 3000 }])
+      const m = as('ops', 'ops_health_metrics', {}, NOW + 1000) as { domain: string; calls: number; errors: number; slow: number; avg_latency_ms: number; people: number }[]
+      expect(m.map((r) => r.domain)).toEqual(['request', 'dispatch', 'tracking', 'notification', 'payment', 'maps', 'transition'])
+      expect(m.find((r) => r.domain === 'dispatch')).toMatchObject({ calls: 20, errors: 2, slow: 1, avg_latency_ms: 400, people: 2 })
+      expect(m.find((r) => r.domain === 'maps')).toMatchObject({ calls: 0, errors: 0, avg_latency_ms: 0, people: 0 })
+    })
+  })
+
+  describe('alerts', () => {
+    it('are all quiet on a healthy system that has served rides', () => {
+      matched(); complete()
+      matched('r2', 'rider-2', 'd2'); as('rider-2', 'cancel_ride', { request_id: 'r2' }, NOW + 3 * MIN)
+      expect(firing(NOW + 5 * MIN)).toEqual([])
+      expect(invariants()).toEqual([])
+    })
+
+    it('lists every check with its threshold, message and runbook, firing ones first', () => {
+      const all = alerts()
+      expect(all.map((a) => a.code)).toEqual(expect.arrayContaining(['matching_failures', 'offer_timeouts', 'dispatch_paused', 'stale_tracking', 'degraded_tracking', 'state_invariants', 'transition_errors', 'notification_failures', 'notifications_undelivered', 'payment_records', 'request_error_rate', 'dispatch_error_rate', 'tracking_error_rate', 'notification_error_rate', 'payment_error_rate', 'maps_error_rate']))
+      for (const a of all) {
+        expect(a.threshold, a.code).not.toBe('')
+        expect(a.message, a.code).not.toBe('')
+        expect(['dispatch-outage', 'map-outage', 'notification-outage', 'rollback'], a.code).toContain(a.runbook)
+      }
+      event('u', { domain: 'transition', code: 'step_rejected' }); event('u', { domain: 'transition', code: 'step_rejected' }, NOW + 1); event('u', { domain: 'transition', code: 'step_rejected' }, NOW + 2)
+      expect(alerts(NOW + 10)[0]).toMatchObject({ code: 'transition_errors', firing: 1, severity: 'critical' })
+    })
+
+    describe('matching failures', () => {
+      it('fire when at least half of at least three searches ended with no driver', () => {
+        unanswered('a', 'r-a'); unanswered('b', 'r-b')
+        expect(alert('matching_failures', NOW + 3 * MIN)).toMatchObject({ firing: 0, value: 100 }) // 100% failing, but only 2 searches
+        unanswered('c', 'r-c')
+        expect(alert('matching_failures', NOW + 3 * MIN)).toMatchObject({ firing: 1, value: 100, severity: 'critical', runbook: 'dispatch-outage' })
+      })
+
+      it('do not fire when most searches are matched', () => {
+        for (const [i, id] of ['m1', 'm2', 'm3', 'm4'].entries()) { matched(id, `rider-${i}`, `drv-${i}`); }
+        unanswered('u1', 'r-u1'); unanswered('u2', 'r-u2')
+        expect(alert('matching_failures', NOW + 3 * MIN)).toMatchObject({ firing: 0, value: 33 })
+      })
+
+      it('fire at exactly half', () => {
+        matched('m1', 'rider-m1', 'd1'); matched('m2', 'rider-m2', 'd2'); matched('m3', 'rider-m3', 'd3')
+        unanswered('u1', 'r-u1'); unanswered('u2', 'r-u2'); unanswered('u3', 'r-u3')
+        expect(alert('matching_failures', NOW + 3 * MIN)).toMatchObject({ firing: 1, value: 50 })
+      })
+
+      it('forget searches that ended outside the window', () => {
+        unanswered('a', 'r-a'); unanswered('b', 'r-b'); unanswered('c', 'r-c')
+        expect(alert('matching_failures', NOW + 30 * MIN).firing).toBe(0)
+        expect(firing(NOW + 30 * MIN, 60)).toContain('matching_failures') // a wider window sees them
+      })
+    })
+
+    it('flags drivers who do not answer offers', () => {
+      makeDriver('d1')
+      for (let i = 0; i < 6; i++) {
+        db.prepare('UPDATE driver_availability SET available = 1')
+        request(`o${i}`, `rider-o${i}`, NOW + i * 40_000)
+        as(`rider-o${i}`, 'dispatch_tick', { request_id: `o${i}` }, NOW + i * 40_000)
+        as('d1', 'decline_offer', { rider_id: `rider-o${i}`, request_id: `o${i}` }, NOW + i * 40_000 + 1000)
+      }
+      expect(alert('offer_timeouts', NOW + 5 * MIN)).toMatchObject({ firing: 1, value: 100 })
+    })
+
+    describe('stale tracking', () => {
+      const live = (at = NOW) => as('d1', 'publish_driver_location', { ...trip(), ...SYDNEY, accuracy_m: 5 }, at)
+
+      it('fires when an active trip has had no location for five minutes, and not before', () => {
+        matched(); step('en_route'); live(NOW)
+        expect(alert('stale_tracking', NOW + 5 * MIN)).toMatchObject({ firing: 0 })
+        expect(alert('stale_tracking', NOW + 5 * MIN + 1)).toMatchObject({ firing: 1, value: 1, severity: 'critical' })
+      })
+
+      it('counts a driver who never published at all, from the moment they set off', () => {
+        matched(); step('en_route')
+        expect(alert('stale_tracking', NOW + 2 * MIN).firing).toBe(0)
+        expect(alert('stale_tracking', NOW + 6 * MIN).firing).toBe(1)
+      })
+
+      it('ignores trips that are not active: scheduled, completed and cancelled', () => {
+        matched('s', 'rider-s', 'd5') // scheduled only
+        matched(); complete()
+        matched('c', 'rider-c', 'd6'); as('rider-c', 'cancel_ride', { request_id: 'c' })
+        expect(alert('stale_tracking', NOW + 60 * MIN).firing).toBe(0)
+      })
+
+      it('stays quiet while updates keep arriving', () => {
+        matched(); step('en_route')
+        for (let i = 0; i < 10; i++) live(NOW + i * 4000)
+        expect(firing(NOW + 36_000 + 10_000)).toEqual([])
+      })
+
+      it('warns when half of several active trips are over a minute behind', () => {
+        matched('a', 'rider-a', 'd1'); matched('b', 'rider-b', 'd2')
+        for (const [id, rider, driver] of [['a', 'rider-a', 'd1'], ['b', 'rider-b', 'd2']] as const) {
+          step('en_route', id, rider, driver)
+          as(driver, 'publish_driver_location', { ...trip(id, rider), ...SYDNEY }, NOW)
+        }
+        expect(alert('degraded_tracking', NOW + 90_000)).toMatchObject({ firing: 1, severity: 'warning', value: 2 })
+        expect(alert('stale_tracking', NOW + 90_000).firing).toBe(0)
+      })
+
+      it('does not warn for a single late trip (not enough to be a pattern)', () => {
+        matched(); step('en_route'); live(NOW)
+        expect(alert('degraded_tracking', NOW + 90_000).firing).toBe(0)
+      })
+    })
+
+    describe('critical state-transition errors', () => {
+      it('flags each kind of disagreement between trip, ride and offer', () => {
+        const break_ = (sql: string, code: string) => {
+          db = new DatabaseSync(':memory:'); migrate(db, new Set())
+          matched(); complete()
+          db.prepare(sql).run()
+          expect(invariants().map((i) => i.code), code).toContain(code)
+          expect(alert('state_invariants').firing, code).toBe(1)
+        }
+        break_("UPDATE ride_requests SET status = 'open'", 'completed_request_not_completed')
+        break_("UPDATE dispatch_offers SET status = 'accepted'", 'driver_locked_by_finished_trip')
+        break_("UPDATE trip_lifecycle SET outcome = NULL", 'finished_without_outcome')
+        break_("DELETE FROM trip_lifecycle", 'finished_without_lifecycle')
+      })
+
+      it('flags a cancelled trip whose ride is still open, and an active trip with no accepted offer', () => {
+        matched(); step('en_route')
+        db.prepare("UPDATE dispatch_offers SET status = 'cancelled'").run()
+        expect(invariants().map((i) => i.code)).toEqual(['active_trip_without_lock'])
+        db.prepare("UPDATE dispatch_offers SET status = 'accepted'").run()
+        db.prepare("UPDATE trips SET status = 'cancelled'").run()
+        db.prepare("UPDATE dispatch_offers SET status = 'cancelled'").run()
+        expect(invariants().map((i) => i.code)).toContain('cancelled_request_still_open')
+      })
+
+      it('flags a match with no trip, a search that never ended, and a trip left open for hours', () => {
+        request('x', 'rider-x')
+        db.prepare("UPDATE dispatch_requests SET status = 'matched'").run()
+        expect(invariants()).toEqual([]) // matched a moment ago: the trip is still being created
+        expect(as('ops', 'ops_health_invariants', {}, NOW + 3 * MIN).map((i) => (i as { code: string }).code)).toEqual(['matched_without_trip'])
+        db.prepare("UPDATE dispatch_requests SET status = 'searching'").run()
+        expect(as('ops', 'ops_health_invariants', {}, NOW + 5 * MIN).map((i) => (i as { code: string }).code)).toEqual(['search_never_ended'])
+        db = new DatabaseSync(':memory:'); migrate(db, new Set())
+        matched(); step('en_route')
+        expect(as('ops', 'ops_health_invariants', {}, NOW + 7 * 60 * MIN).map((i) => (i as { code: string }).code)).toContain('trip_stuck_open')
+      })
+
+      it('turns the invariants into a critical alert with the runbook', () => {
+        matched(); complete()
+        db.prepare("UPDATE ride_requests SET status = 'open'").run()
+        expect(alert('state_invariants')).toMatchObject({ firing: 1, value: 1, severity: 'critical', domain: 'transition', runbook: 'rollback' })
+      })
+
+      it('fires when the app reports three trip steps refused that it thought were legal; warnings do not count', () => {
+        event('u', { domain: 'transition', code: 'step_rejected' }); event('u', { domain: 'transition', code: 'step_rejected' }, NOW + 1)
+        event('u', { domain: 'transition', code: 'offer_lost', severity: 'warn' }, NOW + 2); event('u', { domain: 'transition', code: 'offer_lost', severity: 'warn' }, NOW + 3)
+        expect(alert('transition_errors', NOW + 10)).toMatchObject({ firing: 0, value: 2 })
+        event('u', { domain: 'transition', code: 'step_rejected' }, NOW + 4)
+        expect(alert('transition_errors', NOW + 10)).toMatchObject({ firing: 1, value: 3 })
+      })
+    })
+
+    it('flags notification failures and notifications nobody delivered', () => {
+      matched()
+      for (let i = 0; i < 5; i++) db.prepare("INSERT INTO notifications (user_id, id, kind, role, link, params, critical, actor_id, created_at, push_status, email_status) VALUES ('rider-1', ?, 'trip_started', 'rider', '/trip/r1', '{}', 0, 'd1', ?, 'failed', 'none')").run(`f${i}`, NOW)
+      expect(alert('notification_failures', NOW + MIN)).toMatchObject({ firing: 1, value: 5, runbook: 'notification-outage' })
+      db.prepare('DELETE FROM notifications').run()
+      for (let i = 0; i < 10; i++) db.prepare("INSERT INTO notifications (user_id, id, kind, role, link, params, critical, actor_id, created_at, push_status, push_next_at, email_status) VALUES ('rider-1', ?, 'trip_started', 'rider', '/trip/r1', '{}', 0, 'd1', ?, 'pending', ?, 'none')").run(`p${i}`, NOW, NOW)
+      expect(alert('notifications_undelivered', NOW + 5 * MIN).firing).toBe(0) // still fresh
+      expect(alert('notifications_undelivered', NOW + 11 * MIN)).toMatchObject({ firing: 1, value: 10 })
+    })
+
+    it('flags a finished trip without a fare statement, a statement that is not the quote, and over-credit', () => {
+      matched(); complete()
+      expect(alert('payment_records').firing).toBe(0)
+      db.prepare('UPDATE fare_statements SET final_cents = 1').run()
+      expect(alert('payment_records')).toMatchObject({ firing: 1, value: 1, severity: 'critical', domain: 'payment' })
+      db.prepare('DELETE FROM fare_statements').run()
+      expect(alert('payment_records').value).toBe(1) // now a missing statement
+    })
+
+    it('flags an elevated failure rate for a domain from the counters, with a floor so a quiet minute cannot trigger it', () => {
+      metrics('a', [{ d: 'maps', c: 19, e: 19, s: 0, l: 100 }])
+      expect(alert('maps_error_rate', NOW + 1000)).toMatchObject({ firing: 0, value: 100 }) // under 20 calls
+      metrics('b', [{ d: 'maps', c: 1, e: 0, s: 0, l: 1 }])
+      expect(alert('maps_error_rate', NOW + 1000)).toMatchObject({ firing: 1, value: 95, runbook: 'map-outage' })
+      metrics('c', [{ d: 'request', c: 100, e: 9, s: 0, l: 1 }])
+      expect(alert('request_error_rate', NOW + 1000)).toMatchObject({ firing: 0, value: 9 }) // just under 10%
+      metrics('d', [{ d: 'request', c: 10, e: 5, s: 0, l: 1 }])
+      expect(alert('request_error_rate', NOW + 1000)).toMatchObject({ firing: 1, value: 12 })
+      metrics('e', [{ d: 'notification', c: 40, e: 40, s: 0, l: 1 }])
+      expect(alert('notification_error_rate', NOW + 1000).runbook).toBe('notification-outage')
+    })
+
+    it('uses the requested window, capped at two hours', () => {
+      metrics('a', [{ d: 'maps', c: 30, e: 30, s: 0, l: 1 }])
+      expect(firing(NOW + 30 * MIN)).not.toContain('maps_error_rate')
+      expect(firing(NOW + 30 * MIN, 60)).toContain('maps_error_rate')
+      expect(() => as('ops', 'ops_health_alerts', { window_min: 500 })).not.toThrow()
+    })
+  })
+
+  describe('dispatch switch', () => {
+    const pause = (extra: Record<string, unknown> = {}, who = 'ops', now = NOW) => as(who, 'ops_set_service_flag', { name: 'dispatch', paused: 1, reason_code: 'dispatch_outage', note: 'matching is down', ...extra }, now)
+    const status = (who = 'rider-1') => (as(who, 'get_service_status')[0] as { dispatch_paused: number }).dispatch_paused
+
+    it('starts running, and pausing needs a valid reason code, a note and the dispatch switch', () => {
+      expect(status()).toBe(0)
+      pause({ reason_code: 'because' }); pause({ note: ' ' }); pause({ name: 'payments' }); pause({ paused: 2 })
+      expect(() => pause({ reason_code: undefined })).toThrow(/reason_code/) // required
+      expect(count(db, 'service_flag_log')).toBe(0)
+      expect(status()).toBe(0)
+    })
+
+    it('refuses new ride requests while paused, and lets a paused system resume', () => {
+      as('rider-1', 'save_ride', { ...ride('r1') })
+      pause()
+      expect(status()).toBe(1)
+      as('rider-1', 'request_dispatch', { request_id: 'r1' })
+      expect(count(db, 'dispatch_requests')).toBe(0)
+      pause({ paused: 0, reason_code: 'resolved', note: 'matching restored' }, 'ops', NOW + 5)
+      expect(status()).toBe(0)
+      as('rider-1', 'request_dispatch', { request_id: 'r1' }, NOW + 6)
+      expect(count(db, 'dispatch_requests')).toBe(1)
+    })
+
+    it('refuses quote acceptance while paused and keeps the quote usable afterwards', () => {
+      makeDriver('d1')
+      const qs = { pickup_lat: SYDNEY.lat, pickup_lng: SYDNEY.lng, dropoff_lat: SYDNEY.lat + 0.045, dropoff_lng: SYDNEY.lng, distance_m: 5000 }
+      as('rider-1', 'create_quote', { quote_id: 'q', vehicle_class: 'share', pickup_label: 'A', dropoff_label: 'B', duration_s: 600, ...qs })
+      pause()
+      as('rider-1', 'accept_quote', { quote_id: 'q', ride_id: 'ride-q', client_record: '{}', ...qs })
+      expect(as('rider-1', 'get_quote', { quote_id: 'q' })).toMatchObject([{ status: 'pending' }])
+      expect(count(db, 'ride_requests')).toBe(0)
+      pause({ paused: 0, reason_code: 'resolved', note: 'ok' }, 'ops', NOW + 5)
+      as('rider-1', 'accept_quote', { quote_id: 'q', ride_id: 'ride-q', client_record: '{}', ...qs }, NOW + 6)
+      expect(as('rider-1', 'get_quote', { quote_id: 'q' })).toMatchObject([{ status: 'accepted', ride_id: 'ride-q' }])
+    })
+
+    it('leaves running searches, active trips and tracking alone', () => {
+      matched(); step('en_route')
+      request('r2', 'rider-2')
+      pause()
+      as('rider-2', 'dispatch_tick', { request_id: 'r2' })
+      expect(as('rider-2', 'get_dispatch_status', { request_id: 'r2' })).toMatchObject([{ status: 'searching' }])
+      expect(as('d1', 'publish_driver_location', { ...trip(), ...SYDNEY })).toBeUndefined()
+      expect(count(db, 'trip_locations')).toBe(1)
+      step('arrived'); as('d1', 'start_trip', trip()); step('completed')
+      expect(db.prepare('SELECT status FROM trips').get()).toEqual({ status: 'completed' })
+    })
+
+    it('ignores a repeat of the current state, so the log only records real changes', () => {
+      pause(); pause(); pause({ note: 'again' })
+      expect(count(db, 'service_flag_log')).toBe(1)
+      pause({ paused: 0, reason_code: 'resolved', note: 'ok' }); pause({ paused: 0, reason_code: 'resolved', note: 'ok again' })
+      expect(count(db, 'service_flag_log')).toBe(2)
+    })
+
+    it('raises an alert while paused and appears in the audit trail with who and why', () => {
+      pause({}, 'ops', NOW + 3)
+      expect(alert('dispatch_paused', NOW + 4)).toMatchObject({ firing: 1, severity: 'warning', runbook: 'dispatch-outage' })
+      expect((as('ops', 'ops_list_audit') as { action: string; actor_id: string; reason_code: string; note: string; at: number }[]).filter((a) => a.action.startsWith('service_'))).toEqual([{ at: NOW + 3, action: 'service_paused', actor_id: 'ops', rider_id: null, trip_id: null, driver_user_id: null, reason_code: 'dispatch_outage', note: 'matching is down', amount_cents: null }])
+      pause({ paused: 0, reason_code: 'resolved', note: 'back' }, 'ops', NOW + 9)
+      expect(alert('dispatch_paused', NOW + 10).firing).toBe(0)
+      expect((as('ops', 'ops_list_audit') as { action: string }[]).filter((a) => a.action.startsWith('service_')).map((a) => a.action)).toEqual(['service_resumed', 'service_paused'])
+    })
+  })
+})

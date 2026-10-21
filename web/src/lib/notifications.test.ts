@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { actions, notifyUser, subscribe, isSubscribed } = vi.hoisted(() => ({ actions: { call: vi.fn() }, notifyUser: vi.fn(), subscribe: vi.fn(), isSubscribed: vi.fn() }))
+const { tel } = vi.hoisted(() => ({ tel: { reportError: vi.fn(), recordCall: vi.fn() } }))
+vi.mock('./telemetry', async (importOriginal) => ({ ...(await importOriginal<typeof import('./telemetry')>()), reportError: tel.reportError, recordCall: tel.recordCall }))
 vi.mock('./app', () => ({ app: { actions, notifications: { notifyUser, subscribe, isSubscribed } } }))
 
 import { CRITICAL_KINDS, DEFAULT_PREFS, MAX_PER_PUMP, deliverPending, enablePush, loadInbox, loadPrefs, markRead, renderNotification, savePrefs, type Kind } from './notifications'
@@ -8,6 +10,8 @@ import { CRITICAL_KINDS, DEFAULT_PREFS, MAX_PER_PUMP, deliverPending, enablePush
 const KINDS: Kind[] = ['offer_received', 'driver_assigned', 'driver_en_route', 'driver_arrived', 'trip_started', 'receipt_ready', 'trip_cancelled', 'rider_no_show', 'driver_no_show', 'dispute_resolved']
 
 beforeEach(() => {
+  tel.reportError.mockReset()
+  tel.recordCall.mockReset()
   actions.call.mockReset()
   notifyUser.mockReset()
   subscribe.mockReset()
@@ -157,5 +161,24 @@ describe('deliverPending', () => {
     notifyUser.mockResolvedValue({ sent: 1, failed: 0 })
     expect(await deliverPending('')).toEqual({ sent: 2, failed: 0, skipped: 0 })
     expect(notifyUser).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports a delivery that failed, without the message, and counts every attempt', async () => {
+    serve([row(), row({ id: 'b', channel: 'email' })])
+    notifyUser.mockResolvedValueOnce({ sent: 0, failed: 1 }).mockResolvedValueOnce({ sent: 0, failed: 0, email: 'failed' })
+    await deliverPending('')
+    expect(tel.reportError).toHaveBeenCalledWith({ domain: 'notification', code: 'push_not_delivered', severity: 'warn', detail: 'no push delivered' })
+    expect(tel.reportError).toHaveBeenCalledWith({ domain: 'notification', code: 'email_not_delivered', severity: 'warn', detail: 'email failed' })
+    expect(tel.recordCall).toHaveBeenCalledTimes(2)
+    expect(tel.recordCall).toHaveBeenCalledWith('notification', false, expect.any(Number))
+    expect(JSON.stringify(tel.reportError.mock.calls)).not.toContain('Tu conductor')
+  })
+
+  it('does not report a success or an unsubscribed recipient as a failure', async () => {
+    serve([row(), row({ id: 'b', channel: 'email' })])
+    notifyUser.mockResolvedValueOnce({ sent: 1, failed: 0 }).mockResolvedValueOnce({ sent: 0, failed: 0, email: 'skipped', skipped: 'unsubscribed' })
+    await deliverPending('')
+    expect(tel.reportError).not.toHaveBeenCalled()
+    expect(tel.recordCall).toHaveBeenCalledWith('notification', true, expect.any(Number))
   })
 })

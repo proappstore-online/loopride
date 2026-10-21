@@ -38,6 +38,15 @@ beforeEach(() => {
     ops_list_disputes: [{ rider_id: 'rider-1', trip_id: 'r1:trip', opened_by: 'rider-1', opened_role: 'rider', reason_code: 'cancel_fee', note: 'unfair', status: 'open', opened_at: 1, outcome: 'rider_cancelled', cancel_fee_cents: 500 }],
     ops_list_refund_requests: [{ rider_id: 'rider-1', request_key: 'k1', trip_id: 'r1:trip', amount_cents: 600, reason_code: 'overcharged', note: 'meter ran long', status: 'requested', requested_by: 'ops-2', requested_at: 1 }],
     ops_list_escalations: [{ id: 'e1', rider_id: 'rider-1', trip_id: 'r1:trip', driver_user_id: null, level: 'safety', reason_code: 'safety', note: 'incident', status: 'open', opened_by: 'ops-2', opened_at: 1 }],
+    ops_health_alerts: [
+      { code: 'matching_failures', domain: 'dispatch', severity: 'critical', firing: 1, value: 80, threshold: '>=50% of >=3 searches ended with no driver', message: 'Riders are not getting matched', runbook: 'dispatch-outage' },
+      { code: 'stale_tracking', domain: 'tracking', severity: 'critical', firing: 0, value: 0, threshold: '>=1 active trip with no location for 5 minutes', message: 'Riders cannot see their driver', runbook: 'dispatch-outage' },
+      { code: 'maps_error_rate', domain: 'maps', severity: 'warning', firing: 1, value: 30, threshold: '>=10% of >=20 calls', message: 'Maps calls are failing more than usual', runbook: 'map-outage' },
+    ],
+    ops_health_metrics: [{ domain: 'dispatch', calls: 120, errors: 6, slow: 2, avg_latency_ms: 340, people: 9, gauge_a: 4, gauge_b: 3 }, { domain: 'maps', calls: 0, errors: 0, slow: 0, avg_latency_ms: 0, people: 0, gauge_a: null, gauge_b: null }],
+    ops_health_invariants: [],
+    ops_health_errors: [{ domain: 'dispatch', code: 'action_failed', severity: 'error', n: 6, people: 3, last_at: 1_700_000_000_000, sample_trip: 'r1:trip', action: 'dispatch_tick', status: 503 }],
+    get_service_status: [{ dispatch_paused: 0 }],
     ops_list_audit: [{ at: 5, action: 'trip_cancelled', actor_id: 'ops-2', rider_id: 'rider-1', trip_id: 'r1:trip', driver_user_id: null, reason_code: 'vehicle_issue', note: 'tow', amount_cents: null }],
   }
   actions.call.mockImplementation(async (name: string) => serve[name] ?? undefined)
@@ -71,7 +80,7 @@ describe('Ops console: access', () => {
     hold('ops')
     mount()
     await screen.findByRole('tablist', { name: 'Console sections' })
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Trips', 'Drivers', 'Disputes', 'Refunds', 'Escalations', 'Audit'])
+    await waitFor(() => expect(screen.getAllByRole('tab').map((t) => t.textContent?.replace(/\d+$/, ''))).toEqual(['Trips', 'Drivers', 'Disputes', 'Refunds', 'Escalations', 'Audit', 'Health']))
   })
 })
 
@@ -376,5 +385,114 @@ describe('Ops console: queues and audit', () => {
     serve.ops_list_disputes = []
     await open('Disputes')
     expect(await screen.findByText('No open disputes.')).toBeInTheDocument()
+  })
+})
+
+describe('Ops console: health', () => {
+  beforeEach(() => hold('ops'))
+  const openHealth = async () => {
+    mount()
+    await userEvent.click(await screen.findByRole('tab', { name: /Health/ }))
+  }
+
+  it('shows how many alerts are firing on the tab itself, from any section', async () => {
+    mount()
+    const tab = await screen.findByRole('tab', { name: /Health/ })
+    await waitFor(() => expect(tab).toHaveTextContent('2'))
+    expect(calls('ops_health_alerts')[0]).toEqual({ window_min: 15 })
+  })
+
+  it('says the tab could not be checked when health fails to load, instead of showing nothing', async () => {
+    actions.call.mockImplementation(async (name: string) => {
+      if (name === 'ops_health_alerts') throw new Error('503')
+      return serve[name] ?? undefined
+    })
+    mount()
+    expect(await screen.findByRole('tab', { name: /Health/ })).toHaveTextContent('!')
+    await userEvent.click(screen.getByRole('tab', { name: /Health/ }))
+    expect(await screen.findByText(/Couldn't read health/)).toBeInTheDocument()
+  })
+
+  it('lists every check, firing ones with their value, threshold and a link to the runbook', async () => {
+    await openHealth()
+    expect(await screen.findByText('2 alerts firing')).toBeInTheDocument()
+    const alerts = screen.getByRole('list', { name: 'Alerts' })
+    expect(within(alerts).getAllByRole('listitem')).toHaveLength(3)
+    const matching = within(alerts).getByText(/Riders are not getting matched/).closest('li')!
+    expect(matching).toHaveTextContent('now 80')
+    expect(matching).toHaveTextContent('fires at >=50% of >=3 searches ended with no driver')
+    expect(within(matching).getByRole('link', { name: 'Runbook: dispatch outage' })).toHaveAttribute('href', 'https://github.com/proappstore-online/loopride/blob/main/docs/runbooks/dispatch-outage.md')
+    expect(within(alerts).getByRole('link', { name: 'Runbook: map outage' })).toHaveAttribute('href', expect.stringContaining('/map-outage.md'))
+    const quiet = within(alerts).getByText(/Riders cannot see their driver/).closest('li')!
+    expect(within(quiet).queryByRole('link')).not.toBeInTheDocument()
+  })
+
+  it('says all checks pass when none fire', async () => {
+    serve.ops_health_alerts = (serve.ops_health_alerts as { firing: number }[]).map((a) => ({ ...a, firing: 0 }))
+    await openHealth()
+    expect(await screen.findByText('All checks passing')).toBeInTheDocument()
+  })
+
+  it('shows calls by area, grouped errors without who, and inconsistent states', async () => {
+    serve.ops_health_invariants = [{ ref: 'rider-1|r1:trip', code: 'driver_locked_by_finished_trip', detail: 'd1' }]
+    await openHealth()
+    const table = await screen.findByRole('table')
+    expect(within(within(table).getByText('dispatch').closest('tr')!).getAllByRole('cell').map((c) => c.textContent)).toEqual(['dispatch', '120', '6', '2', '340', '9']) // area, calls, failed, slow, avg ms, people
+    const line = await screen.findByText((_, el) => el?.tagName === 'LI' && /dispatch · action failed · error · 6× by 3 people/.test(el.textContent ?? ''))
+    expect(line).toHaveTextContent('HTTP 503')
+    expect(line).toHaveTextContent('e.g. r1:trip')
+    expect(screen.getByText('driver locked by finished trip')).toBeInTheDocument()
+  })
+
+  it('says so when everything is consistent and nothing has failed', async () => {
+    serve.ops_health_errors = []
+    await openHealth()
+    expect(await screen.findByText('None. Every trip, ride and offer agrees.')).toBeInTheDocument()
+    expect(screen.getByText('No errors in this window.')).toBeInTheDocument()
+  })
+
+  it('changes the window', async () => {
+    await openHealth()
+    await userEvent.selectOptions(await screen.findByLabelText('Window'), '60')
+    await waitFor(() => expect(calls('ops_health_alerts').at(-1)).toEqual({ window_min: 60 }))
+    expect(calls('ops_health_errors').at(-1)).toMatchObject({ window_min: 60 })
+  })
+
+  it('pauses dispatch only with a reason and a note, and tells the operator what it does and does not affect', async () => {
+    await openHealth()
+    const box = await screen.findByRole('group', { name: 'Dispatch switch' })
+    expect(within(box).getByText('Ride dispatch is running')).toBeInTheDocument()
+    expect(within(box).getByText(/active trips, tracking and notifications are not affected/)).toBeInTheDocument()
+    const pause = within(box).getByRole('button', { name: 'Pause dispatch' })
+    expect(pause).toBeDisabled()
+    await userEvent.type(within(box).getByLabelText('Note'), 'matching is down')
+    expect(pause).toBeDisabled() // a note alone is not enough
+    await userEvent.selectOptions(within(box).getByLabelText('Reason'), 'dispatch_outage')
+    await userEvent.click(pause)
+    await waitFor(() => expect(calls('ops_set_service_flag')).toEqual([{ name: 'dispatch', paused: 1, reason_code: 'dispatch_outage', note: 'matching is down' }]))
+    expect(toast).toHaveBeenCalledWith({ message: 'Dispatch paused' })
+  })
+
+  it('resumes dispatch with a note, recording the reason as resolved', async () => {
+    serve.get_service_status = [{ dispatch_paused: 1 }]
+    await openHealth()
+    const box = await screen.findByRole('group', { name: 'Dispatch switch' })
+    expect(await within(box).findByText('Ride dispatch is PAUSED')).toBeInTheDocument()
+    await userEvent.type(within(box).getByLabelText('Note'), 'matching restored')
+    await userEvent.click(within(box).getByRole('button', { name: 'Resume dispatch' }))
+    await waitFor(() => expect(calls('ops_set_service_flag')).toEqual([{ name: 'dispatch', paused: 0, reason_code: 'resolved', note: 'matching restored' }]))
+  })
+
+  it('shows a refusal rather than pretending the switch worked', async () => {
+    actions.call.mockImplementation(async (name: string) => {
+      if (name === 'ops_set_service_flag') throw new Error('403')
+      return serve[name] ?? undefined
+    })
+    await openHealth()
+    const box = await screen.findByRole('group', { name: 'Dispatch switch' })
+    await userEvent.type(within(box).getByLabelText('Note'), 'x')
+    await userEvent.selectOptions(within(box).getByLabelText('Reason'), 'incident')
+    await userEvent.click(within(box).getByRole('button', { name: 'Pause dispatch' }))
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ message: 'That action was refused' }))
   })
 })
