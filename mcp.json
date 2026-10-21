@@ -835,6 +835,115 @@
         }
       },
       "requires_auth": true
+    },
+    {
+      "name": "create_quote",
+      "description": "Rider: price one vehicle tier for a geocoded route. The client sends coordinates and the routed distance/duration; the server computes every fare component (base, distance, time, booking fee, minimum-fare adjustment, demand surge), counts free eligible drivers near the pickup, and stores a quote valid for 5 minutes. Replaces the caller's older pending quotes for this tier and any for a different route. The server rejects a routed distance below 90% of the straight line.",
+      "operation": "batch",
+      "statements": [
+        "UPDATE fare_quotes SET status = 'expired' WHERE status = 'pending' AND expires_at <= :__now AND :__user_id IS NOT NULL",
+        "UPDATE fare_quotes SET status = 'superseded' WHERE rider_id = :__user_id AND status = 'pending' AND id != :quote_id AND (vehicle_class = :vehicle_class OR pickup_lat != :pickup_lat OR pickup_lng != :pickup_lng OR dropoff_lat != :dropoff_lat OR dropoff_lng != :dropoff_lng)",
+        "INSERT INTO fare_quotes (rider_id, id, pickup_label, pickup_lat, pickup_lng, dropoff_label, dropoff_lat, dropoff_lng, distance_m, duration_s, vehicle_class, base_cents, distance_cents, time_cents, booking_fee_cents, min_adjust_cents, surge_milli, total_cents, nearby_drivers, status, expires_at, created_at) SELECT :__user_id, :quote_id, :pickup_label, :pickup_lat, :pickup_lng, :dropoff_label, :dropoff_lat, :dropoff_lng, :distance_m, :duration_s, :vehicle_class, c.base, c.dist, c.tim, c.fee, c.sub - (c.base + c.dist + c.tim + c.fee), c.surge, CAST((c.sub * c.surge + 500) / 1000 AS INTEGER), c.nearby, 'pending', :__now + 300000, :__now FROM (SELECT s.*, CASE WHEN s.base + s.dist + s.tim + s.fee < s.minimum THEN s.minimum ELSE s.base + s.dist + s.tim + s.fee END AS sub FROM (SELECT 200 AS base, (CAST(:distance_m AS INTEGER) * (CASE :vehicle_class WHEN 'share' THEN 110 WHEN 'comfort' THEN 160 ELSE 220 END)) / 1000 AS dist, (CAST(:duration_s AS INTEGER) * (CASE :vehicle_class WHEN 'share' THEN 25 WHEN 'comfort' THEN 38 ELSE 50 END)) / 60 AS tim, 150 AS fee, CASE :vehicle_class WHEN 'share' THEN 500 WHEN 'comfort' THEN 700 ELSE 900 END AS minimum, (1000 + MIN(1000, MAX(0, (SELECT COUNT(*) FROM dispatch_requests w WHERE w.status = 'searching' AND w.rider_id != :__user_id AND w.started_at >= :__now - 600000 AND ABS(w.pickup_lat - (:pickup_lat)) < 0.05 AND ABS(w.pickup_lng - (:pickup_lng)) < 0.05) - (SELECT COUNT(*) FROM driver_availability da JOIN driver_applications a ON a.user_id = da.user_id JOIN driver_locations l ON l.user_id = da.user_id WHERE da.available = 1 AND a.status = 'approved' AND l.updated_at >= :__now - 300000 AND ABS(l.lat - (:pickup_lat)) < 0.1 AND ABS(l.lng - (:pickup_lng)) < 0.1)) * 250)) AS surge, (SELECT COUNT(*) FROM driver_availability da JOIN driver_applications a ON a.user_id = da.user_id JOIN driver_vehicles v ON v.user_id = da.user_id AND v.id = da.vehicle_id JOIN driver_locations l ON l.user_id = da.user_id WHERE da.available = 1 AND da.user_id != :__user_id AND a.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND v.status = 'approved' AND (CASE coalesce(v.vehicle_class, 'share') WHEN 'share' THEN 0 WHEN 'comfort' THEN 1 WHEN 'xl' THEN 2 END) >= (CASE coalesce(:vehicle_class, 'share') WHEN 'share' THEN 0 WHEN 'comfort' THEN 1 WHEN 'xl' THEN 2 END) AND l.updated_at >= :__now - 300000 AND ((((l.lat) - (:pickup_lat)) * ((l.lat) - (:pickup_lat)) + ((l.lng) - (:pickup_lng)) * ((l.lng) - (:pickup_lng)) * (1 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 2 + ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 24 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 720) * (1 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 2 + ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 24 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 720)) * 12364.5) <= 225 AND ((((l.lat) - (:pickup_lat)) * ((l.lat) - (:pickup_lat)) + ((l.lng) - (:pickup_lng)) * ((l.lng) - (:pickup_lng)) * (1 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 2 + ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 24 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 720) * (1 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 2 + ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 24 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 720)) * 12364.5) <= l.service_radius_km * l.service_radius_km AND NOT EXISTS (SELECT 1 FROM dispatch_offers o WHERE o.driver_id = da.user_id AND o.status IN ('offered', 'accepted'))) AS nearby) s) c WHERE :quote_id != '' AND :vehicle_class IN ('share', 'comfort', 'xl') AND :distance_m BETWEEN 100 AND 200000 AND :duration_s BETWEEN 30 AND 21600 AND :pickup_lat BETWEEN -90 AND 90 AND :pickup_lng BETWEEN -180 AND 180 AND :dropoff_lat BETWEEN -90 AND 90 AND :dropoff_lng BETWEEN -180 AND 180 AND (:distance_m / 1000.0) * (:distance_m / 1000.0) >= 0.81 * ((((:dropoff_lat) - (:pickup_lat)) * ((:dropoff_lat) - (:pickup_lat)) + ((:dropoff_lng) - (:pickup_lng)) * ((:dropoff_lng) - (:pickup_lng)) * (1 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 2 + ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 24 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 720) * (1 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 2 + ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 24 - ((:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295) * (:pickup_lat * 0.017453292519943295)) / 720)) * 12364.5) ON CONFLICT (rider_id, id) DO NOTHING"
+      ],
+      "params": {
+        "quote_id": {
+          "type": "string"
+        },
+        "vehicle_class": {
+          "type": "string"
+        },
+        "pickup_label": {
+          "type": "string"
+        },
+        "pickup_lat": {
+          "type": "number"
+        },
+        "pickup_lng": {
+          "type": "number"
+        },
+        "dropoff_label": {
+          "type": "string"
+        },
+        "dropoff_lat": {
+          "type": "number"
+        },
+        "dropoff_lng": {
+          "type": "number"
+        },
+        "distance_m": {
+          "type": "integer"
+        },
+        "duration_s": {
+          "type": "integer"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "list_pending_quotes",
+      "description": "Rider: the caller's unexpired pending quotes with their fare components, surge and eligible-driver count, cheapest tier first",
+      "operation": "query",
+      "sql": "SELECT id, pickup_label, dropoff_label, distance_m, duration_s, vehicle_class, base_cents, distance_cents, time_cents, booking_fee_cents, min_adjust_cents, surge_milli, total_cents, nearby_drivers, status, expires_at FROM fare_quotes WHERE rider_id = :__user_id AND status = 'pending' AND expires_at > :__now ORDER BY total_cents",
+      "requires_auth": true
+    },
+    {
+      "name": "get_quote",
+      "description": "Rider: the current state of one quote (pending, accepted with its ride id, expired or superseded)",
+      "operation": "query",
+      "sql": "SELECT id, status, ride_id, total_cents, expires_at FROM fare_quotes WHERE rider_id = :__user_id AND id = :quote_id",
+      "params": {
+        "quote_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "expire_stale_quotes",
+      "description": "Maintenance: mark every pending quote past its expiry as expired. Idempotent; create_quote and accept_quote also do this for the quotes they touch.",
+      "operation": "execute",
+      "sql": "UPDATE fare_quotes SET status = 'expired' WHERE status = 'pending' AND expires_at <= :__now AND :__user_id IS NOT NULL",
+      "requires_auth": true
+    },
+    {
+      "name": "accept_quote",
+      "description": "Rider: turn a quote into a ride and hand it to dispatch, atomically. Succeeds only if the quote is pending and unexpired, the route the rider is looking at still matches it (same coordinates, distance within 10%), demand surge is unchanged and a driver is still eligible; otherwise the quote is marked expired or superseded and nothing is created. On success it creates the ride request, the accepted quote row and a searching dispatch request; the client then ticks dispatch. Read get_quote for the outcome.",
+      "operation": "batch",
+      "statements": [
+        "UPDATE fare_quotes SET status = 'expired' WHERE rider_id = :__user_id AND id = :quote_id AND status = 'pending' AND expires_at <= :__now",
+        "UPDATE fare_quotes SET status = 'superseded' WHERE fare_quotes.rider_id = :__user_id AND fare_quotes.id = :quote_id AND fare_quotes.status = 'pending' AND fare_quotes.expires_at > :__now AND NOT (fare_quotes.pickup_lat = :pickup_lat AND fare_quotes.pickup_lng = :pickup_lng AND fare_quotes.dropoff_lat = :dropoff_lat AND fare_quotes.dropoff_lng = :dropoff_lng AND ABS(fare_quotes.distance_m - :distance_m) * 10 <= fare_quotes.distance_m AND (1000 + MIN(1000, MAX(0, (SELECT COUNT(*) FROM dispatch_requests w WHERE w.status = 'searching' AND w.rider_id != :__user_id AND w.started_at >= :__now - 600000 AND ABS(w.pickup_lat - (fare_quotes.pickup_lat)) < 0.05 AND ABS(w.pickup_lng - (fare_quotes.pickup_lng)) < 0.05) - (SELECT COUNT(*) FROM driver_availability da JOIN driver_applications a ON a.user_id = da.user_id JOIN driver_locations l ON l.user_id = da.user_id WHERE da.available = 1 AND a.status = 'approved' AND l.updated_at >= :__now - 300000 AND ABS(l.lat - (fare_quotes.pickup_lat)) < 0.1 AND ABS(l.lng - (fare_quotes.pickup_lng)) < 0.1)) * 250)) = fare_quotes.surge_milli AND (SELECT COUNT(*) FROM driver_availability da JOIN driver_applications a ON a.user_id = da.user_id JOIN driver_vehicles v ON v.user_id = da.user_id AND v.id = da.vehicle_id JOIN driver_locations l ON l.user_id = da.user_id WHERE da.available = 1 AND da.user_id != :__user_id AND a.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND v.status = 'approved' AND (CASE coalesce(v.vehicle_class, 'share') WHEN 'share' THEN 0 WHEN 'comfort' THEN 1 WHEN 'xl' THEN 2 END) >= (CASE coalesce(fare_quotes.vehicle_class, 'share') WHEN 'share' THEN 0 WHEN 'comfort' THEN 1 WHEN 'xl' THEN 2 END) AND l.updated_at >= :__now - 300000 AND ((((l.lat) - (fare_quotes.pickup_lat)) * ((l.lat) - (fare_quotes.pickup_lat)) + ((l.lng) - (fare_quotes.pickup_lng)) * ((l.lng) - (fare_quotes.pickup_lng)) * (1 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 2 + ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 24 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 720) * (1 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 2 + ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 24 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 720)) * 12364.5) <= 225 AND ((((l.lat) - (fare_quotes.pickup_lat)) * ((l.lat) - (fare_quotes.pickup_lat)) + ((l.lng) - (fare_quotes.pickup_lng)) * ((l.lng) - (fare_quotes.pickup_lng)) * (1 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 2 + ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 24 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 720) * (1 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 2 + ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 24 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 720)) * 12364.5) <= l.service_radius_km * l.service_radius_km AND NOT EXISTS (SELECT 1 FROM dispatch_offers o WHERE o.driver_id = da.user_id AND o.status IN ('offered', 'accepted'))) > 0)",
+        "UPDATE fare_quotes SET status = 'accepted', accepted_at = :__now, ride_id = :ride_id WHERE fare_quotes.rider_id = :__user_id AND fare_quotes.id = :quote_id AND fare_quotes.status = 'pending' AND fare_quotes.expires_at > :__now AND fare_quotes.pickup_lat = :pickup_lat AND fare_quotes.pickup_lng = :pickup_lng AND fare_quotes.dropoff_lat = :dropoff_lat AND fare_quotes.dropoff_lng = :dropoff_lng AND ABS(fare_quotes.distance_m - :distance_m) * 10 <= fare_quotes.distance_m AND (1000 + MIN(1000, MAX(0, (SELECT COUNT(*) FROM dispatch_requests w WHERE w.status = 'searching' AND w.rider_id != :__user_id AND w.started_at >= :__now - 600000 AND ABS(w.pickup_lat - (fare_quotes.pickup_lat)) < 0.05 AND ABS(w.pickup_lng - (fare_quotes.pickup_lng)) < 0.05) - (SELECT COUNT(*) FROM driver_availability da JOIN driver_applications a ON a.user_id = da.user_id JOIN driver_locations l ON l.user_id = da.user_id WHERE da.available = 1 AND a.status = 'approved' AND l.updated_at >= :__now - 300000 AND ABS(l.lat - (fare_quotes.pickup_lat)) < 0.1 AND ABS(l.lng - (fare_quotes.pickup_lng)) < 0.1)) * 250)) = fare_quotes.surge_milli AND (SELECT COUNT(*) FROM driver_availability da JOIN driver_applications a ON a.user_id = da.user_id JOIN driver_vehicles v ON v.user_id = da.user_id AND v.id = da.vehicle_id JOIN driver_locations l ON l.user_id = da.user_id WHERE da.available = 1 AND da.user_id != :__user_id AND a.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND v.status = 'approved' AND (CASE coalesce(v.vehicle_class, 'share') WHEN 'share' THEN 0 WHEN 'comfort' THEN 1 WHEN 'xl' THEN 2 END) >= (CASE coalesce(fare_quotes.vehicle_class, 'share') WHEN 'share' THEN 0 WHEN 'comfort' THEN 1 WHEN 'xl' THEN 2 END) AND l.updated_at >= :__now - 300000 AND ((((l.lat) - (fare_quotes.pickup_lat)) * ((l.lat) - (fare_quotes.pickup_lat)) + ((l.lng) - (fare_quotes.pickup_lng)) * ((l.lng) - (fare_quotes.pickup_lng)) * (1 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 2 + ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 24 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 720) * (1 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 2 + ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 24 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 720)) * 12364.5) <= 225 AND ((((l.lat) - (fare_quotes.pickup_lat)) * ((l.lat) - (fare_quotes.pickup_lat)) + ((l.lng) - (fare_quotes.pickup_lng)) * ((l.lng) - (fare_quotes.pickup_lng)) * (1 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 2 + ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 24 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 720) * (1 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 2 + ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 24 - ((fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295) * (fare_quotes.pickup_lat * 0.017453292519943295)) / 720)) * 12364.5) <= l.service_radius_km * l.service_radius_km AND NOT EXISTS (SELECT 1 FROM dispatch_offers o WHERE o.driver_id = da.user_id AND o.status IN ('offered', 'accepted'))) > 0 AND NOT EXISTS (SELECT 1 FROM ride_requests r WHERE r.rider_id = :__user_id AND r.id = :ride_id)",
+        "INSERT INTO ride_requests (rider_id, id, booking_type, status, pickup_label, pickup_lat, pickup_lng, dropoff_label, dropoff_lat, dropoff_lng, vehicle_class, requested_at, client_record, created_at, updated_at) SELECT :__user_id, :ride_id, 'now', 'open', f.pickup_label, f.pickup_lat, f.pickup_lng, f.dropoff_label, f.dropoff_lat, f.dropoff_lng, f.vehicle_class, :__now, :client_record, :__now, :__now FROM fare_quotes f WHERE f.rider_id = :__user_id AND f.id = :quote_id AND f.status = 'accepted' AND f.ride_id = :ride_id ON CONFLICT (rider_id, id) DO NOTHING",
+        "INSERT INTO quotes (rider_id, id, request_id, vehicle_class, fare_cents, status, created_at, updated_at) SELECT :__user_id, :ride_id || ':' || 'quote', :ride_id, f.vehicle_class, f.total_cents, 'accepted', :__now, :__now FROM fare_quotes f WHERE f.rider_id = :__user_id AND f.id = :quote_id AND f.status = 'accepted' AND f.ride_id = :ride_id ON CONFLICT (rider_id, id) DO NOTHING",
+        "INSERT INTO dispatch_requests (rider_id, request_id, status, pickup_lat, pickup_lng, vehicle_class, attempts, started_at, deadline_at, updated_at) SELECT :__user_id, r.id, 'searching', r.pickup_lat, r.pickup_lng, r.vehicle_class, 0, :__now, :__now + 120000, :__now FROM ride_requests r WHERE r.rider_id = :__user_id AND r.id = :ride_id AND r.status = 'open' AND EXISTS (SELECT 1 FROM fare_quotes f WHERE f.rider_id = :__user_id AND f.id = :quote_id AND f.status = 'accepted' AND f.ride_id = :ride_id) ON CONFLICT (rider_id, request_id) DO NOTHING"
+      ],
+      "params": {
+        "quote_id": {
+          "type": "string"
+        },
+        "ride_id": {
+          "type": "string"
+        },
+        "client_record": {
+          "type": "string"
+        },
+        "pickup_lat": {
+          "type": "number"
+        },
+        "pickup_lng": {
+          "type": "number"
+        },
+        "dropoff_lat": {
+          "type": "number"
+        },
+        "dropoff_lng": {
+          "type": "number"
+        },
+        "distance_m": {
+          "type": "integer"
+        }
+      },
+      "requires_auth": true
     }
   ]
 }

@@ -43,6 +43,8 @@ export interface RecurringRide {
   /** Assigned automatically by the marketplace rather than chosen by rider. */
   driverPlate?: string
   driverRating?: number
+  /** Set when the ride came from an accepted server quote: the driver is matched by real dispatch, not simulated. */
+  quoteId?: string
   /** Locally persisted progress for an active on-demand ride. */
   status?: 'en-route' | 'arrived' | 'completed'
 }

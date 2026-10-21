@@ -208,6 +208,53 @@ simulated driver; wiring them to `runDispatch` is a follow-up. Offers reach
 drivers by polling (every 5 s), not push. Driver location is not streamed to
 the rider through these tables.
 
+## Quotes and the on-demand request flow (issue #6)
+
+Migration `0006_fare_quotes` adds `fare_quotes` (the existing `quotes` table stays
+the per-ride accepted-fare record). Client: `web/src/lib/quotes.ts`,
+`components/QuotePicker.tsx`, `views/NewRide.tsx`; the Trip screen now follows
+real dispatch for these rides.
+
+**Flow (signed-in, "Ride now").** 1) Rider enters pickup and destination; the
+client geocodes them and fetches the route (distance, duration). 2) "Get quotes"
+calls `create_quote` once per tier (`share`, `comfort`, `xl`; shown as RideShare,
+Comfort, RideShare XL). Each card shows eligibility ("N drivers nearby" or
+"No drivers nearby"), the fare breakdown and a hold countdown. 3) "Request"
+calls `accept_quote`; the app then opens the Trip screen, which ticks dispatch.
+
+**Pricing is server-side.** The client only sends coordinates, labels and the
+routed distance/duration; the SQL computes base (200¢), distance (110/160/220¢
+per km), time (25/38/50¢ per min), booking fee (150¢), a per-tier minimum
+(500/700/900¢, shown as a "minimum fare adjustment"), and a demand surge. Surge
+is +0.25x for each other rider still searching within about 5 km beyond the
+online drivers within about 10 km, capped at 2.0x. Because the route comes from
+the client, the server rejects a distance under 90% of the straight line and
+out-of-range values, but cannot prove the route itself; a rider can only
+under-report within that bound.
+
+**Eligibility** uses the dispatch rules: online, approved, approved vehicle,
+valid licence, fresh location, within radius and 15 km, tier at or above, not
+already holding an offer, not the rider.
+
+**Lifecycle.** `pending` for 5 minutes, then `expired` (swept by
+`expire_stale_quotes`, `create_quote` and `accept_quote`). A new quote
+`superseded`-s the rider's older pending quote for that tier and every pending
+quote for a different route. `accept_quote` re-checks, in one transaction: still
+pending and unexpired; the coordinates match and the distance is within 10% of
+the quote; the surge is unchanged; a driver is still eligible. If any check
+fails the quote becomes `expired` or `superseded` and nothing is created. On
+success it sets the quote `accepted`, creates the ride request, the accepted
+`quotes` row and a `searching` dispatch request in the same transaction (so a
+ride never exists without being handed to dispatch), and cannot be replayed for a
+second ride.
+
+**Signed-out riders** keep the on-device preview (simulated driver, flat
+estimate), now labelled "Preview only". Live quotes and dispatch need an account.
+
+**Not done.** Tolls/wait-time fees; quotes for scheduled and recurring bookings;
+driver ETA in the quote (SQLite has no `sqrt` for a distance-based ETA);
+server-side geocoding or routing (the platform maps API is called from the client).
+
 ## Migrating legacy rides
 
 Existing rides live in localStorage (`loopride.rides.v2`, which already absorbs

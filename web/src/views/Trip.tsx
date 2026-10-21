@@ -6,6 +6,7 @@ import { getRide, saveRide } from '../storage'
 import { openTransport, type DriverPing, type TransportKind } from '../lib/transport'
 import { interpolate } from '../lib/geo'
 import { LIVE_FEED_TIMEOUT_MS } from '../lib/constants'
+import { loadTripStatus, runDispatch, startDispatch, type DispatchStatus, type TripState } from '../lib/dispatch'
 
 const TripMap = lazy(() => import('./TripMap'))
 const TOTAL_ETA = 8
@@ -24,13 +25,18 @@ export default function Trip({ rideId }: TripProps) {
   const [lastPing, setLastPing] = useState<DriverPing | null>(null)
   const [transportKind, setTransportKind] = useState<TransportKind | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  const [dispatch, setDispatch] = useState<DispatchStatus | null>(null)
+  const [dbTrip, setDbTrip] = useState<TripState | null>(null)
+  const [searchRun, setSearchRun] = useState(0)
+  // Rides from an accepted server quote are matched by real dispatch; nothing about the driver is simulated.
+  const managed = Boolean(ride?.quoteId)
 
   useEffect(() => {
     const savedRide = getRide(rideId)
     setRide(savedRide)
     if (savedRide) {
       setEta(savedRide.etaMinutes ?? TOTAL_ETA)
-      setStatus(savedRide.status ?? (savedRide.bookingType === 'now' ? 'en-route' : 'scheduled'))
+      setStatus(savedRide.quoteId ? 'matching' : (savedRide.status ?? (savedRide.bookingType === 'now' ? 'en-route' : 'scheduled')))
     }
   }, [rideId])
 
@@ -55,14 +61,40 @@ export default function Trip({ rideId }: TripProps) {
   }, [])
 
   useEffect(() => {
-    if (status !== 'en-route' || lastPing) return
-    const t = setInterval(() => setEta((m) => Math.max(0, m - 1)), 3000)
-    return () => clearInterval(t)
-  }, [status, lastPing])
+    if (!managed) return
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setInterval> | undefined
+    runDispatch(rideId, { signal: controller.signal, onUpdate: setDispatch })
+      .then(() => {
+        if (controller.signal.aborted) return
+        const refresh = () => loadTripStatus(rideId).then((s) => !controller.signal.aborted && setDbTrip(s), () => undefined)
+        void refresh()
+        timer = setInterval(refresh, 5000)
+      })
+      .catch(() => undefined)
+    return () => {
+      controller.abort()
+      if (timer) clearInterval(timer)
+    }
+  }, [managed, rideId, searchRun])
 
   useEffect(() => {
-    if (status === 'en-route' && eta === 0 && !lastPing) setStatus('arrived')
-  }, [status, eta, lastPing])
+    if (!managed) return
+    if (dbTrip === 'en_route') setStatus('en-route')
+    else if (dbTrip === 'arrived') setStatus('arrived')
+    else if (dbTrip === 'completed') setStatus('completed')
+    else if (dispatch?.state === 'matched') setStatus('scheduled')
+  }, [managed, dbTrip, dispatch?.state])
+
+  useEffect(() => {
+    if (managed || status !== 'en-route' || lastPing) return
+    const t = setInterval(() => setEta((m) => Math.max(0, m - 1)), 3000)
+    return () => clearInterval(t)
+  }, [managed, status, lastPing])
+
+  useEffect(() => {
+    if (!managed && status === 'en-route' && eta === 0 && !lastPing) setStatus('arrived')
+  }, [managed, status, eta, lastPing])
 
   const liveFeed = lastPing !== null && now - lastPing.at < LIVE_FEED_TIMEOUT_MS
 
@@ -91,6 +123,7 @@ export default function Trip({ rideId }: TripProps) {
     )
   }
 
+  const driverLabel = (managed ? dispatch?.driverName : ride.driverName) || 'Your driver'
   const lastPingAge = lastPing ? Math.round((now - lastPing.at) / 1000) : null
 
   return (
@@ -136,7 +169,8 @@ export default function Trip({ rideId }: TripProps) {
             ? `${DAYS.filter((d) => ride.days.includes(d.id)).map((d) => d.label).join(', ')} at ${ride.time}`
             : `${ride.vehicle === 'xl' ? 'RideShare XL' : ride.vehicle === 'comfort' ? 'Comfort' : 'RideShare'}${ride.fareCents ? ` · $${(ride.fareCents / 100).toFixed(2)}` : ''}`}
         </p>
-        {ride.driverName && <div className="mt-4 flex items-center gap-3 rounded-2xl bg-[var(--accent-soft)] px-4 py-3"><span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--accent)] text-sm font-bold text-white">{ride.driverName.slice(0, 1)}</span><span><span className="block text-sm font-bold text-[var(--ink)]">{ride.driverName}</span><span className="block text-xs text-[var(--muted)]">★ {ride.driverRating ?? 4.9} · {ride.driverPlate ?? 'Matching vehicle'}</span></span><button className="ml-auto text-sm text-[var(--accent)]" aria-label="Call driver">☎</button></div>}
+        {managed && dispatch?.driverName && <div className="mt-4 flex items-center gap-3 rounded-2xl bg-[var(--accent-soft)] px-4 py-3"><span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--accent)] text-sm font-bold text-white">{dispatch.driverName.slice(0, 1)}</span><span><span className="block text-sm font-bold text-[var(--ink)]">{dispatch.driverName}</span><span className="block text-xs text-[var(--muted)]">{dispatch.plate ?? 'Matching vehicle'}</span></span></div>}
+        {!managed && ride.driverName && <div className="mt-4 flex items-center gap-3 rounded-2xl bg-[var(--accent-soft)] px-4 py-3"><span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--accent)] text-sm font-bold text-white">{ride.driverName.slice(0, 1)}</span><span><span className="block text-sm font-bold text-[var(--ink)]">{ride.driverName}</span><span className="block text-xs text-[var(--muted)]">★ {ride.driverRating ?? 4.9} · {ride.driverPlate ?? 'Matching vehicle'}</span></span><button className="ml-auto text-sm text-[var(--accent)]" aria-label="Call driver">☎</button></div>}
       </section>
 
       <section className="mt-4 rounded-3xl border border-[var(--line)] p-6">
@@ -162,15 +196,27 @@ export default function Trip({ rideId }: TripProps) {
           )}
         </div>
         <p className="mt-1 display-font text-2xl font-semibold text-[var(--ink)]">
-          {status === 'matching' && 'Finding a nearby driver'}
-          {status === 'scheduled' && `Reserved for ${ride.scheduledFor ? new Date(ride.scheduledFor).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : ride.time}`}
-          {status === 'en-route' && (liveFeed ? `${ride.driverName || 'Your driver'} is on the way` : `${ride.driverName || 'Your driver'} arrives in ${eta} min`)}
-          {status === 'arrived' && `${ride.driverName || 'Your driver'} has arrived`}
+          {managed && dispatch?.state === 'no_driver' && 'No drivers are available right now'}
+          {managed && dispatch?.state === 'cancelled' && 'Ride cancelled'}
+          {managed && dbTrip === 'cancelled' && 'The driver cancelled this trip'}
+          {status === 'matching' && !(managed && (dispatch?.state === 'no_driver' || dispatch?.state === 'cancelled' || dbTrip === 'cancelled')) && (managed && dispatch?.offerStatus === 'offered' ? 'Waiting for a driver to confirm' : 'Finding a nearby driver')}
+          {managed && status === 'scheduled' && `${dispatch?.driverName ?? 'Your driver'} accepted and is getting ready`}
+          {!managed && status === 'scheduled' && `Reserved for ${ride.scheduledFor ? new Date(ride.scheduledFor).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : ride.time}`}
+          {status === 'en-route' && (liveFeed || managed ? `${driverLabel} is on the way` : `${driverLabel} arrives in ${eta} min`)}
+          {status === 'arrived' && `${driverLabel} has arrived`}
           {status === 'completed' && 'Trip completed'}
         </p>
 
         <div className="mt-5 flex flex-wrap gap-2">
-          {(status === 'scheduled' || status === 'matching') && (
+          {managed && dispatch?.state === 'no_driver' && (
+            <button
+              onClick={() => startDispatch(rideId).then(() => setSearchRun((n) => n + 1), () => undefined)}
+              className="rounded-2xl bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-white"
+            >
+              Search again
+            </button>
+          )}
+          {!managed && (status === 'scheduled' || status === 'matching') && (
             <button
               onClick={() => {
                 setStatus('en-route')

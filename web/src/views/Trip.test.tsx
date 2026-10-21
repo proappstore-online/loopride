@@ -64,3 +64,73 @@ describe('Trip', () => {
     expect(screen.getByTestId('trip-map').dataset.driver).toBe('0.7,0.7')
   })
 })
+
+describe('Trip with real dispatch', () => {
+  const dispatched: RecurringRide = { ...ride, id: 'ride-live', driverName: '', driverPlate: undefined, driverRating: undefined, quoteId: 'q1' }
+
+  it('shows searching, never a simulated driver, and offers no preview button', async () => {
+    vi.resetModules()
+    vi.doMock('../lib/dispatch', () => ({
+      runDispatch: vi.fn(async (_id: string, o: { onUpdate: (s: unknown) => void }) => {
+        o.onUpdate({ state: 'searching', attempts: 0, offerStatus: null, driverName: null, plate: null })
+        return new Promise(() => undefined)
+      }),
+      loadTripStatus: vi.fn(),
+      startDispatch: vi.fn(),
+    }))
+    const { default: LiveTrip } = await import('./Trip')
+    const { saveRide: save } = await import('../storage')
+    save(dispatched)
+    render(renderWithRouter(<LiveTrip rideId="ride-live" />).ui)
+    expect(await screen.findByText('Finding a nearby driver')).toBeInTheDocument()
+    expect(screen.queryByText(/Jordan/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Preview driver arrival' })).not.toBeInTheDocument()
+    vi.doUnmock('../lib/dispatch')
+  })
+
+  it('shows the matched driver and the DB trip progress', async () => {
+    vi.resetModules()
+    let tripStatus: string | null = null
+    vi.doMock('../lib/dispatch', () => ({
+      runDispatch: vi.fn(async (_id: string, o: { onUpdate: (s: unknown) => void }) => {
+        const matched = { state: 'matched', attempts: 1, offerStatus: 'accepted', driverName: 'Dana', plate: 'RS-9' }
+        o.onUpdate(matched)
+        return matched
+      }),
+      loadTripStatus: vi.fn(async () => tripStatus),
+      startDispatch: vi.fn(),
+    }))
+    const { default: LiveTrip } = await import('./Trip')
+    const { saveRide: save } = await import('../storage')
+    save(dispatched)
+    tripStatus = 'en_route'
+    render(renderWithRouter(<LiveTrip rideId="ride-live" />).ui)
+    expect(await screen.findByText('Dana')).toBeInTheDocument()
+    expect(screen.getByText('RS-9')).toBeInTheDocument()
+    expect(await screen.findByText(/Dana is on the way|Dana arrives in/)).toBeInTheDocument()
+    vi.doUnmock('../lib/dispatch')
+  })
+
+  it('offers to search again when no driver was found', async () => {
+    vi.resetModules()
+    const startDispatch = vi.fn(async () => undefined)
+    vi.doMock('../lib/dispatch', () => ({
+      runDispatch: vi.fn(async (_id: string, o: { onUpdate: (s: unknown) => void }) => {
+        const none = { state: 'no_driver', attempts: 3, offerStatus: null, driverName: null, plate: null }
+        o.onUpdate(none)
+        return none
+      }),
+      loadTripStatus: vi.fn(async () => null),
+      startDispatch,
+    }))
+    const { default: LiveTrip } = await import('./Trip')
+    const { saveRide: save } = await import('../storage')
+    const { default: userEvent } = await import('@testing-library/user-event')
+    save(dispatched)
+    render(renderWithRouter(<LiveTrip rideId="ride-live" />).ui)
+    expect(await screen.findByText('No drivers are available right now')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Search again' }))
+    expect(startDispatch).toHaveBeenCalledWith('ride-live')
+    vi.doUnmock('../lib/dispatch')
+  })
+})

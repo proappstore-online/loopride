@@ -1047,3 +1047,211 @@ describe('driver availability and dispatch matching', () => {
     expect(offers('rider-1')).toEqual([])
   })
 })
+
+describe('on-demand quotes and request handoff', () => {
+  let db: Db
+  const NOW = Date.UTC(2026, 5, 1)
+  const PICKUP = { lat: -33.8688, lng: 151.2093 }
+  const DROPOFF = { lat: -33.8688 + 0.045, lng: 151.2093 } // ~5 km north
+  const near = (km: number) => ({ lat: PICKUP.lat + km * 0.009, lng: PICKUP.lng })
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const as = (user: string, name: string, params: Record<string, unknown> = {}, now = NOW) => call(db, name, params, user, now)
+
+  const makeDriver = (id: string, vehicleClass = 'share', at = PICKUP) => {
+    as(id, 'save_driver_application', { full_name: id, phone: '1', licence_number: id, licence_region: 'NSW', licence_expires: '2030-01-01', eligibility_confirmed: 1 })
+    as(id, 'save_driver_vehicle', { vehicle_id: `v-${id}`, plate: id, make: 'T', model: 'C', vehicle_class: vehicleClass })
+    as(id, 'submit_driver_application')
+    as('ops', 'review_driver_application', { driver_user_id: id, decision: 'approved' })
+    as(id, 'update_driver_location', { ...at, service_radius_km: 10 })
+    as(id, 'set_driver_availability', { available: 1, vehicle_id: `v-${id}` })
+  }
+
+  const route = { pickup_label: 'Central', pickup_lat: PICKUP.lat, pickup_lng: PICKUP.lng, dropoff_label: 'North', dropoff_lat: DROPOFF.lat, dropoff_lng: DROPOFF.lng, distance_m: 5000, duration_s: 600 }
+  const quote = (id: string, vehicle_class = 'share', extra: Record<string, unknown> = {}, rider = 'rider-1', now = NOW) =>
+    as(rider, 'create_quote', { quote_id: id, vehicle_class, ...route, ...extra }, now)
+  const row = (id: string) => db.prepare('SELECT * FROM fare_quotes WHERE id = ?').get(id) as Record<string, number | string | null> | undefined
+  const accept = (id: string, extra: Record<string, unknown> = {}, rider = 'rider-1', now = NOW) =>
+    as(rider, 'accept_quote', { quote_id: id, ride_id: `ride-${id}`, client_record: '{"id":"ride"}', pickup_lat: route.pickup_lat, pickup_lng: route.pickup_lng, dropoff_lat: route.dropoff_lat, dropoff_lng: route.dropoff_lng, distance_m: route.distance_m, ...extra }, now)
+
+  it('captures the route and prices every component on the server', () => {
+    quote('qs', 'share')
+    quote('qc', 'comfort')
+    quote('qx', 'xl')
+    expect(row('qs')).toMatchObject({ pickup_label: 'Central', distance_m: 5000, duration_s: 600, base_cents: 200, distance_cents: 550, time_cents: 250, booking_fee_cents: 150, min_adjust_cents: 0, surge_milli: 1000, total_cents: 1150, status: 'pending', created_at: NOW, expires_at: NOW + 300_000 })
+    expect(row('qc')).toMatchObject({ distance_cents: 800, time_cents: 380, total_cents: 1530 })
+    expect(row('qx')).toMatchObject({ distance_cents: 1100, time_cents: 500, total_cents: 1950 })
+    expect((as('rider-1', 'list_pending_quotes') as { id: string }[]).map((r) => r.id)).toEqual(['qs', 'qc', 'qx'])
+  })
+
+  it('applies a minimum fare and shows the adjustment', () => {
+    quote('short', 'share', { distance_m: 200, duration_s: 60, dropoff_lat: PICKUP.lat + 0.0018, dropoff_lng: PICKUP.lng })
+    expect(row('short')).toMatchObject({ base_cents: 200, distance_cents: 22, time_cents: 25, booking_fee_cents: 150, min_adjust_cents: 103, total_cents: 500 })
+  })
+
+  it('reports eligible drivers per tier: bigger vehicles serve smaller tiers, never the reverse', () => {
+    quote('none')
+    expect(row('none')?.nearby_drivers).toBe(0)
+    makeDriver('s', 'share', near(1))
+    makeDriver('x', 'xl', near(2))
+    quote('qs'); quote('qc', 'comfort'); quote('qx', 'xl')
+    expect([row('qs')?.nearby_drivers, row('qc')?.nearby_drivers, row('qx')?.nearby_drivers]).toEqual([2, 1, 1])
+  })
+
+  it('ignores busy, offline, out-of-range and own-account drivers when counting eligibility', () => {
+    makeDriver('far', 'share', near(30))
+    makeDriver('off'); as('off', 'set_driver_availability', { available: 0 })
+    makeDriver('mine'); // the rider is also a driver: never matched to themselves
+    makeDriver('busy', 'share', near(1))
+    as('rider-2', 'save_ride', { ...rideToRecords({ id: 'x', pickup: 'A', pickupCoord: PICKUP, dropoff: 'B', dropoffCoord: null, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share' }) })
+    db.prepare("INSERT INTO dispatch_offers (rider_id, request_id, attempt, driver_id, status, offered_at, expires_at) VALUES ('rider-2', 'x', 1, 'busy', 'offered', 1, 2)").run()
+    makeDriver('ok', 'share', near(2)) // positive control: the only countable driver
+    quote('q', 'share', {}, 'mine')
+    expect(row('q')?.nearby_drivers).toBe(1) // far, off and busy excluded; 'mine' is the caller
+  })
+
+  it('prices demand surge from waiting riders vs. nearby drivers, excluding the rider\'s own search', () => {
+    makeDriver('d1')
+    for (const [i, rider] of ['w1', 'w2', 'w3'].entries()) {
+      as(rider, 'save_ride', { ...rideToRecords({ id: `w${i}`, pickup: 'A', pickupCoord: near(0.5), dropoff: 'B', dropoffCoord: null, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share' }) })
+      as(rider, 'request_dispatch', { request_id: `w${i}` })
+    }
+    quote('surged')
+    expect(row('surged')).toMatchObject({ surge_milli: 1500, total_cents: 1725 }) // (3 waiting - 1 driver) * 0.25x
+    expect(row('surged')?.total_cents).toBe(Math.round((1150 * 1500) / 1000))
+    quote('own', 'share', {}, 'w1')
+    expect(row('own')?.surge_milli).toBe(1250) // w1's own search is excluded
+    for (const r of ['w4', 'w5', 'w6', 'w7', 'w8']) {
+      as(r, 'save_ride', { ...rideToRecords({ id: r, pickup: 'A', pickupCoord: near(0.5), dropoff: 'B', dropoffCoord: null, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share' }) })
+      as(r, 'request_dispatch', { request_id: r })
+    }
+    quote('capped')
+    expect(row('capped')?.surge_milli).toBe(2000) // capped at 2.0x
+  })
+
+  it('rejects malformed or implausible routes', () => {
+    quote('under', 'share', { distance_m: 3000 }) // shorter than the 5 km straight line
+    quote('badclass', 'limo')
+    quote('tiny', 'share', { distance_m: 50 })
+    quote('lat', 'share', { pickup_lat: 95 })
+    quote('time', 'share', { duration_s: 5 })
+    expect(count(db, 'fare_quotes')).toBe(0)
+    quote('ok', 'share', { distance_m: 4600 }) // 92% of straight line: allowed (roads can't beat 90%)
+    expect(row('ok')).toBeDefined()
+  })
+
+  it('a new quote supersedes older ones for that tier and for any other route; other tiers on the same route coexist', () => {
+    quote('a-share'); quote('a-comfort', 'comfort')
+    quote('b-share') // same route + tier
+    expect([row('a-share')?.status, row('b-share')?.status, row('a-comfort')?.status]).toEqual(['superseded', 'pending', 'pending'])
+    quote('c-xl', 'xl', { dropoff_lat: DROPOFF.lat + 0.01, distance_m: 6200 }) // route changed
+    expect([row('b-share')?.status, row('a-comfort')?.status, row('c-xl')?.status]).toEqual(['superseded', 'superseded', 'pending'])
+    expect(as('rider-1', 'list_pending_quotes')).toHaveLength(1)
+    expect(as('rider-2', 'list_pending_quotes')).toEqual([]) // never touches other riders' quotes
+  })
+
+  it('quotes expire after 5 minutes and cannot be accepted', () => {
+    quote('q')
+    expect(as('rider-1', 'list_pending_quotes', {}, NOW + 299_999)).toHaveLength(1)
+    expect(as('rider-1', 'list_pending_quotes', {}, NOW + 300_000)).toEqual([])
+    accept('q', {}, 'rider-1', NOW + 300_000)
+    expect(row('q')?.status).toBe('expired')
+    expect(count(db, 'ride_requests')).toBe(0)
+    expect(count(db, 'dispatch_requests')).toBe(0)
+  })
+
+  it('expire_stale_quotes expires only overdue pending quotes', () => {
+    quote('old')
+    quote('fresh', 'comfort', {}, 'rider-2', NOW + 200_000)
+    as('rider-3', 'expire_stale_quotes', {}, NOW + 310_000)
+    expect([row('old')?.status, row('fresh')?.status]).toEqual(['expired', 'pending'])
+  })
+
+  it('accepting creates the ride, the accepted quote and a searching dispatch request, and dispatch can match it', () => {
+    makeDriver('d1', 'share', near(1))
+    quote('q')
+    accept('q')
+    expect(row('q')).toMatchObject({ status: 'accepted', ride_id: 'ride-q', accepted_at: NOW })
+    expect(db.prepare('SELECT booking_type, status, pickup_label, vehicle_class, client_record FROM ride_requests').get()).toEqual({ booking_type: 'now', status: 'open', pickup_label: 'Central', vehicle_class: 'share', client_record: '{"id":"ride"}' })
+    expect(db.prepare('SELECT fare_cents, status, request_id FROM quotes').get()).toEqual({ fare_cents: 1150, status: 'accepted', request_id: 'ride-q' })
+    expect(as('rider-1', 'get_dispatch_status', { request_id: 'ride-q' })).toMatchObject([{ status: 'searching' }])
+
+    as('rider-1', 'dispatch_tick', { request_id: 'ride-q' })
+    expect(as('d1', 'list_my_offers')).toMatchObject([{ request_id: 'ride-q', status: 'offered', fare_cents: 1150 }])
+    expect(as('rider-1', 'get_quote', { quote_id: 'q' })).toEqual([{ id: 'q', status: 'accepted', ride_id: 'ride-q', total_cents: 1150, expires_at: NOW + 300_000 }])
+  })
+
+  it('accept is idempotent and a quote cannot be reused for a second ride', () => {
+    makeDriver('d1')
+    quote('q')
+    accept('q')
+    accept('q')
+    accept('q', { ride_id: 'another-ride' })
+    expect(count(db, 'ride_requests')).toBe(1)
+    expect(count(db, 'dispatch_requests')).toBe(1)
+    expect(row('q')?.ride_id).toBe('ride-q')
+  })
+
+  it('refuses when the route changed materially, and tolerates a small drift', () => {
+    makeDriver('d1')
+    quote('moved')
+    accept('moved', { dropoff_lat: DROPOFF.lat + 0.02 })
+    expect(row('moved')?.status).toBe('superseded')
+    quote('longer')
+    accept('longer', { distance_m: 5600 }) // +12%
+    expect(row('longer')?.status).toBe('superseded')
+    quote('drift')
+    accept('drift', { distance_m: 5400 }) // +8%
+    expect(row('drift')?.status).toBe('accepted')
+    expect(count(db, 'ride_requests')).toBe(1)
+  })
+
+  it('refuses when demand moved: the surge changed, or no driver is eligible any more', () => {
+    makeDriver('d1')
+    quote('q1')
+    for (const [i, rider] of ['w1', 'w2'].entries()) {
+      as(rider, 'save_ride', { ...rideToRecords({ id: `w${i}`, pickup: 'A', pickupCoord: near(0.5), dropoff: 'B', dropoffCoord: null, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share' }) })
+      as(rider, 'request_dispatch', { request_id: `w${i}` })
+    }
+    accept('q1')
+    expect(row('q1')?.status).toBe('superseded') // surge 1.0 -> 1.25
+    expect(count(db, 'ride_requests')).toBe(3 - 1) // only the two waiting riders'
+
+    db.prepare("UPDATE dispatch_requests SET status = 'cancelled'").run()
+    quote('q2')
+    as('d1', 'set_driver_availability', { available: 0 })
+    accept('q2')
+    expect(row('q2')?.status).toBe('superseded')
+  })
+
+  it('only the owner can accept a quote', () => {
+    makeDriver('d1')
+    quote('q')
+    accept('q', {}, 'rider-2')
+    expect(row('q')?.status).toBe('pending')
+    expect(as('rider-2', 'get_quote', { quote_id: 'q' })).toEqual([])
+    expect(count(db, 'ride_requests')).toBe(0)
+  })
+
+  it('does not accept onto a ride id that already exists', () => {
+    makeDriver('d1')
+    as('rider-1', 'save_ride', { ...rideToRecords({ id: 'taken', pickup: 'A', pickupCoord: PICKUP, dropoff: 'B', dropoffCoord: null, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share' }) })
+    quote('q')
+    accept('q', { ride_id: 'taken' })
+    expect(row('q')?.status).toBe('pending')
+  })
+
+  it('save_ride replay of an accepted ride keeps one quote row at the accepted fare', () => {
+    makeDriver('d1')
+    quote('q')
+    accept('q')
+    as('rider-1', 'save_ride', { ...rideToRecords({ id: 'ride-q', pickup: 'Central', pickupCoord: PICKUP, dropoff: 'North', dropoffCoord: DROPOFF, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share', fareCents: 1150 }) }, NOW + 1)
+    expect(count(db, 'quotes')).toBe(1)
+    expect(count(db, 'ride_requests')).toBe(1)
+    expect(db.prepare('SELECT fare_cents FROM quotes').get()).toEqual({ fare_cents: 1150 })
+  })
+})

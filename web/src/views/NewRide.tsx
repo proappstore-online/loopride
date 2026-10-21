@@ -6,6 +6,8 @@ import { saveRide } from '../storage'
 import { firstMatch, geocode } from '../lib/maps'
 import { fetchRoute } from '../lib/routing'
 import { LIMITS } from '../lib/constants'
+import { useAuth } from '../lib/useAuth'
+import QuotePicker from '../components/QuotePicker'
 
 interface GeoSuggestion { lat: number; lng: number; displayName: string; shortName: string }
 type BookingMode = 'now' | 'scheduled' | 'recurring'
@@ -24,6 +26,7 @@ function initialMode(location: string): BookingMode {
 
 export default function NewRide() {
   const [location, setLocation] = useLocation()
+  const auth = useAuth()
   const [mode, setMode] = useState<BookingMode>(() => initialMode(typeof window === 'undefined' ? location : window.location.search))
   const [pickup, setPickup] = useState('')
   const [pickupCoord, setPickupCoord] = useState<LatLng | null>(null)
@@ -37,6 +40,8 @@ export default function NewRide() {
   const [error, setError] = useState<string | null>(null)
   const selectedVehicle = useMemo(() => VEHICLES.find((item) => item.id === vehicle)!, [vehicle])
   const estimate = Math.round(1180 * selectedVehicle.multiplier)
+  // Signed-in on-demand requests use server quotes and real dispatch. Signed-out, the on-device preview below is unchanged.
+  const live = mode === 'now' && Boolean(auth.user)
   const valid = pickup.trim() && dropoff.trim() && (mode !== 'recurring' || days.length > 0)
 
   const toggleDay = (day: DayOfWeek) => setDays((current) => current.includes(day) ? current.filter((item) => item !== day) : [...current, day])
@@ -44,7 +49,7 @@ export default function NewRide() {
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
-    if (!valid || saving) return
+    if (!valid || saving || live) return
     setSaving(true)
     setError(null)
     try {
@@ -92,12 +97,14 @@ export default function NewRide() {
         <div className="space-y-4"><AddressInput label="Pickup" value={pickup} onChange={(value) => { setPickup(value); setPickupCoord(null) }} onSelect={(name, coord) => { setPickup(name); setPickupCoord(coord) }} placeholder="Enter pickup" maxLength={LIMITS.pickupChars} testIdPrefix="pickup" /><AddressInput label="Destination" value={dropoff} onChange={(value) => { setDropoff(value); setDropoffCoord(null) }} onSelect={(name, coord) => { setDropoff(name); setDropoffCoord(coord) }} placeholder="Where are you going?" maxLength={LIMITS.dropoffChars} testIdPrefix="dropoff" /></div>
       </section>
 
-      {mode !== 'recurring' && <section><p className="mb-3 text-xs font-bold uppercase tracking-[0.14em] text-[var(--muted)]">Choose a ride</p><div className="space-y-2">{VEHICLES.map((item) => <button type="button" key={item.id} onClick={() => setVehicle(item.id)} className={`flex w-full items-center gap-4 rounded-2xl border p-4 text-left transition ${vehicle === item.id ? 'border-[var(--accent)] bg-[var(--accent-soft)]' : 'border-[var(--line)] bg-[var(--paper)]'}`}><span className="grid h-10 w-12 place-items-center rounded-xl bg-[var(--ink)] text-xl text-white">{item.id === 'xl' ? '▰' : item.id === 'comfort' ? '◒' : '◐'}</span><span className="flex-1"><span className="block text-sm font-extrabold text-[var(--ink)]">{item.label}</span><span className="mt-0.5 block text-xs text-[var(--muted)]">{item.description}</span></span><span className="text-sm font-bold text-[var(--ink)]">${(1180 * item.multiplier / 100).toFixed(2)}</span></button>)}</div></section>}
+      {live && <QuotePicker pickup={pickup} pickupCoord={pickupCoord} dropoff={dropoff} dropoffCoord={dropoffCoord} onAccepted={(ride) => { saveRide(ride); setLocation(`/trip/${ride.id}`) }} />}
+      {mode === 'now' && !auth.loading && !auth.user && <p role="note" className="rounded-xl bg-[var(--accent-soft)] px-4 py-3 text-xs leading-5 text-[var(--ink)]">Preview only. Sign in to get live quotes, see nearby drivers and have a real driver matched.</p>}
+      {!live && mode !== 'recurring' && <section><p className="mb-3 text-xs font-bold uppercase tracking-[0.14em] text-[var(--muted)]">Choose a ride</p><div className="space-y-2">{VEHICLES.map((item) => <button type="button" key={item.id} onClick={() => setVehicle(item.id)} className={`flex w-full items-center gap-4 rounded-2xl border p-4 text-left transition ${vehicle === item.id ? 'border-[var(--accent)] bg-[var(--accent-soft)]' : 'border-[var(--line)] bg-[var(--paper)]'}`}><span className="grid h-10 w-12 place-items-center rounded-xl bg-[var(--ink)] text-xl text-white">{item.id === 'xl' ? '▰' : item.id === 'comfort' ? '◒' : '◐'}</span><span className="flex-1"><span className="block text-sm font-extrabold text-[var(--ink)]">{item.label}</span><span className="mt-0.5 block text-xs text-[var(--muted)]">{item.description}</span></span><span className="text-sm font-bold text-[var(--ink)]">${(1180 * item.multiplier / 100).toFixed(2)}</span></button>)}</div></section>}
       {mode === 'scheduled' && <section className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4"><p className="mb-3 text-sm font-extrabold text-[var(--ink)]">When should we pick you up?</p><div className="grid grid-cols-2 gap-3"><input aria-label="Pickup date" type="date" value={date} onChange={(e) => setDate(e.target.value)} className="rounded-xl border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-sm text-[var(--ink)]" /><input aria-label="Pickup time" type="time" value={time} onChange={(e) => setTime(e.target.value)} className="rounded-xl border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-sm text-[var(--ink)]" /></div></section>}
       {mode === 'recurring' && <section className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4"><p className="text-sm font-extrabold text-[var(--ink)]">Build a routine</p><p className="mt-1 text-xs text-[var(--muted)]">We’ll remind you to book when it’s time to leave.</p><div className="mt-4 flex flex-wrap gap-2">{DAYS.map((day) => <button type="button" key={day.id} aria-pressed={days.includes(day.id)} onClick={() => toggleDay(day.id)} className={`rounded-xl border px-3 py-2 text-xs font-bold ${days.includes(day.id) ? 'border-[var(--accent)] bg-[var(--accent)] text-white' : 'border-[var(--line)] text-[var(--ink)]'}`}>{day.label}</button>)}</div><input aria-label="Routine time" type="time" value={time} onChange={(e) => setTime(e.target.value)} className="mt-4 rounded-xl border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-sm text-[var(--ink)]" /></section>}
       {error && <p className="rounded-xl bg-[#fff0ee] px-4 py-3 text-xs font-semibold text-[var(--error)]">{error}</p>}
-      <button type="submit" disabled={!valid || saving} className="w-full rounded-2xl bg-[var(--accent)] px-5 py-4 text-sm font-extrabold text-white shadow-sm disabled:opacity-40">{saving ? 'Creating your ride…' : action}</button>
-      <p className="text-center text-[11px] leading-4 text-[var(--muted)]">Estimate shown before booking. Final fare may vary with route, demand, tolls, and wait time.</p>
+      {!live && <button type="submit" disabled={!valid || saving} className="w-full rounded-2xl bg-[var(--accent)] px-5 py-4 text-sm font-extrabold text-white shadow-sm disabled:opacity-40">{saving ? 'Creating your ride…' : action}</button>}
+      {!live && <p className="text-center text-[11px] leading-4 text-[var(--muted)]">Estimate shown before booking. Final fare may vary with route, demand, tolls, and wait time.</p>}
     </form>
   </div>
 }
