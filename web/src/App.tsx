@@ -9,59 +9,20 @@ import DriverTrip from './views/DriverTrip'
 import Account from './views/Account'
 import DriverOnboarding from './views/DriverOnboarding'
 import Ops from './views/Ops'
-import { getRole, setRole } from './lib/mode'
-import { clearShareHash, decodeShareHash } from './lib/share'
-import { getRide, saveRide } from './storage'
+import { getRole } from './lib/mode'
 import { useRideSync } from './lib/rideSync'
-
-interface ShareResult {
-  rideId: string
-}
-
-function consumeShareHash(): ShareResult | null {
-  if (typeof window === 'undefined') return null
-  const incoming = decodeShareHash(window.location.hash)
-  if (!incoming) return null
-  if (!getRide(incoming.id)) {
-    saveRide(incoming)
-  }
-  clearShareHash()
-  setRole('driver')
-  return { rideId: incoming.id }
-}
 
 export default function App() {
   const [location, setLocation] = useLocation()
-  // Guards the one-shot first-paint navigation so StrictMode's double-invoke
-  // (or any other remount) doesn't run it twice — the second pass would see
-  // a cleared hash + getRole() === 'driver' and clobber /driver/:id with a
-  // plain /driver redirect.
-  const bootRedirected = useRef(false)
+  const redirected = useRef(false)
 
   useRideSync()
 
-  // First-paint navigation. Three cases, in priority order:
-  //   1. URL has #ride= → import the ride and jump to /driver/:id
-  //   2. URL is "/" and the saved role is driver → redirect to /driver
-  //   3. Otherwise leave the URL alone
-  // Plus a hashchange listener so a share hash arriving later still works.
+  // A returning driver lands on the driver home instead of the rider home.
   useEffect(() => {
-    if (!bootRedirected.current) {
-      bootRedirected.current = true
-      const shareResult = consumeShareHash()
-      if (shareResult) {
-        setLocation(`/driver/${shareResult.rideId}`)
-      } else if (location === '/' && getRole() === 'driver') {
-        setLocation('/driver', { replace: true })
-      }
-    }
-
-    const onHash = () => {
-      const result = consumeShareHash()
-      if (result) setLocation(`/driver/${result.rideId}`)
-    }
-    window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
+    if (redirected.current) return
+    redirected.current = true
+    if (location === '/' && getRole() === 'driver') setLocation('/driver', { replace: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -76,8 +37,8 @@ export default function App() {
       <Route path="/driver" component={DriverHome} />
       <Route path="/driver/onboarding" component={DriverOnboarding} />
       <Route path="/ops" component={Ops} />
-      <Route path="/driver/:rideId">
-        {(params) => <DriverTrip rideId={params.rideId} />}
+      <Route path="/driver/trip/:riderId/:rideId">
+        {(params) => <DriverTrip riderId={params.riderId} rideId={params.rideId} />}
       </Route>
       <Route>
         <NotFound />

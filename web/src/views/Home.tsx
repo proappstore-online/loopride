@@ -22,6 +22,8 @@ export default function Home() {
   const planned = rides.filter((ride) => ride.bookingType === 'recurring')
 
   const remove = (ride: RecurringRide) => {
+    // A matched ride is cancelled on its trip page, where the reason and any fee are shown first.
+    if (ride.quoteId) return setLocation(`/trip/${ride.id}`)
     deleteRide(ride.id)
     showToast({ message: `Cancelled ride to ${ride.dropoff}`, action: { label: 'Undo', onClick: () => saveRide(ride) } })
   }
@@ -69,6 +71,6 @@ export default function Home() {
 function RideCard({ ride, onOpen, onCancel }: { ride: RecurringRide; onOpen: () => void; onCancel: () => void }) {
   return <li className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4 shadow-[0_5px_24px_rgba(12,34,27,0.03)]">
     <button onClick={onOpen} className="block w-full text-left"><div className="flex gap-3"><div className="mt-1 flex flex-col items-center"><span className="h-2.5 w-2.5 rounded-full border-2 border-[var(--accent)]" /><span className="h-5 border-l border-dashed border-[var(--muted)]" /><span className="h-2.5 w-2.5 rounded-sm bg-[var(--ink)]" /></div><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-[var(--ink)]">{ride.dropoff}</p><p className="mt-1 truncate text-xs text-[var(--muted)]">From {ride.pickup}</p><p className="mt-2 text-xs font-semibold text-[var(--accent)]">{rideLabel(ride)}</p></div>{ride.fareCents && <p className="text-sm font-bold text-[var(--ink)]">${(ride.fareCents / 100).toFixed(2)}</p>}</div></button>
-    <button onClick={onCancel} className="mt-3 text-xs font-bold text-[var(--error)] hover:underline">Cancel ride</button>
+    <button onClick={onCancel} className="mt-3 text-xs font-bold text-[var(--error)] hover:underline">{ride.quoteId ? 'Manage ride' : 'Cancel ride'}</button>
   </li>
 }

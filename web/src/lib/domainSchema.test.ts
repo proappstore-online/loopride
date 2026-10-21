@@ -307,12 +307,15 @@ describe('trip persistence and transition history', () => {
     expect(tripStatus()).toBe('en_route')
     advance('driver-1', 'arrived', '{"lat":-33.86}', 'user-a', 2_000)
     advance('driver-1', 'arrived', undefined, 'user-a', 2_500) // replay — no-op
+    advance('driver-1', 'completed', undefined, 'user-a', 2_700) // not started yet — refused
+    expect(tripStatus()).toBe('arrived')
+    call(db, 'start_trip', { rider_id: 'user-a', trip_id: 'now-1:trip' }, 'driver-1', 2_800)
     advance('driver-1', 'completed', undefined, 'user-a', 3_000)
     advance('driver-1', 'en_route', undefined, 'user-a', 4_000) // terminal — no-op
     expect(tripStatus()).toBe('completed')
     expect(history().slice(1)).toEqual([
       { from_status: 'en_route', to_status: 'arrived', actor_type: 'driver', actor_id: 'driver-1', metadata: '{"lat":-33.86}', at: 2_000 },
-      { from_status: 'arrived', to_status: 'completed', actor_type: 'driver', actor_id: 'driver-1', metadata: null, at: 3_000 },
+      { from_status: 'arrived', to_status: 'completed', actor_type: 'driver', actor_id: 'driver-1', metadata: '{"source":"driver"}', at: 3_000 },
     ])
     expect(db.prepare('SELECT status FROM trip_events ORDER BY at').all().map((e) => (e as { status: string }).status)).toEqual([
       'en_route',
@@ -335,10 +338,10 @@ describe('trip persistence and transition history', () => {
   it('a driver can cancel, which cancels the ride request', () => {
     call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
     linkDriver('driver-1')
-    advance('driver-1', 'cancelled', '{"reason":"vehicle fault"}')
+    call(db, 'driver_cancel_trip', { rider_id: 'user-a', trip_id: 'now-1:trip', reason_code: 'vehicle_issue' }, 'driver-1', 5_000)
     expect(tripStatus()).toBe('cancelled')
     expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'cancelled' })
-    expect(history()[1]).toMatchObject({ to_status: 'cancelled', actor_type: 'driver', metadata: '{"reason":"vehicle fault"}' })
+    expect(history()[1]).toMatchObject({ to_status: 'cancelled', actor_type: 'driver' })
   })
 
   it('rider queries are scoped to the caller', () => {
@@ -879,6 +882,7 @@ describe('driver availability and dispatch matching', () => {
     for (const to of ['en_route', 'arrived']) as('d1', 'advance_trip', { rider_id: 'rider-1', trip_id: 'r1:trip', to_status: to })
     tick('rider-2', 'r2')
     expect(offeredTo('r2')).toBeUndefined()
+    as('d1', 'start_trip', { rider_id: 'rider-1', trip_id: 'r1:trip' })
     as('d1', 'advance_trip', { rider_id: 'rider-1', trip_id: 'r1:trip', to_status: 'completed' })
     expect(offerStatuses().map((o) => o.status)).toEqual(['completed'])
     tick('rider-2', 'r2')
@@ -1022,7 +1026,7 @@ describe('driver availability and dispatch matching', () => {
     request('rider-1')
     tick('rider-1')
     accept('d1')
-    as('d1', 'advance_trip', { rider_id: 'rider-1', trip_id: 'r1:trip', to_status: 'cancelled', metadata: '{"reason":"flat tyre"}' })
+    as('d1', 'driver_cancel_trip', { rider_id: 'rider-1', trip_id: 'r1:trip', reason_code: 'vehicle_issue', note: 'flat tyre' })
     expect(offerStatuses()).toEqual([{ driver_id: 'd1', status: 'cancelled' }])
   })
 
@@ -1253,5 +1257,390 @@ describe('on-demand quotes and request handoff', () => {
     expect(count(db, 'quotes')).toBe(1)
     expect(count(db, 'ride_requests')).toBe(1)
     expect(db.prepare('SELECT fare_cents FROM quotes').get()).toEqual({ fare_cents: 1150 })
+  })
+})
+
+describe('authoritative trip lifecycle and permissions', () => {
+  let db: Db
+  const NOW = Date.UTC(2026, 5, 1)
+  const SYDNEY = { lat: -33.8688, lng: 151.2093 }
+  const MIN = 60_000
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const as = (user: string, name: string, params: Record<string, unknown> = {}, now = NOW) => call(db, name, params, user, now)
+
+  const makeDriver = (id: string) => {
+    as(id, 'save_driver_application', { full_name: `Driver ${id}`, phone: '1', licence_number: id, licence_region: 'NSW', licence_expires: '2030-01-01', eligibility_confirmed: 1 })
+    as(id, 'save_driver_vehicle', { vehicle_id: `v-${id}`, plate: id, make: 'T', model: 'C', vehicle_class: 'share' })
+    as(id, 'submit_driver_application')
+    as('ops', 'review_driver_application', { driver_user_id: id, decision: 'approved' })
+    as(id, 'update_driver_location', { ...SYDNEY, service_radius_km: 10 })
+    as(id, 'set_driver_availability', { available: 1, vehicle_id: `v-${id}` })
+  }
+  const ride = (id: string, fareCents = 1500): RecurringRide => ({ id, pickup: 'Central', pickupCoord: SYDNEY, dropoff: 'Airport', dropoffCoord: null, days: [], time: '09:00', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share', fareCents })
+  /** Rider requests, driver d1 accepts at `at`. Trip id is `<id>:trip`. */
+  const matched = (id = 'r1', rider = 'rider-1', driver = 'd1', at = NOW, fareCents = 1500) => {
+    if (!db.prepare('SELECT 1 FROM drivers WHERE user_id = ?').get(driver)) makeDriver(driver)
+    as(rider, 'save_ride', { ...rideToRecords(ride(id, fareCents)) }, at)
+    as(rider, 'request_dispatch', { request_id: id }, at)
+    as(rider, 'dispatch_tick', { request_id: id }, at)
+    as(driver, 'accept_offer', { rider_id: rider, request_id: id }, at)
+  }
+  const trip = (id = 'r1:trip', rider = 'rider-1') => ({ rider_id: rider, trip_id: id })
+  const advance = (to: string, driver = 'd1', now = NOW, id = 'r1:trip', rider = 'rider-1') => as(driver, 'advance_trip', { ...trip(id, rider), to_status: to }, now)
+  const start = (driver = 'd1', now = NOW, id = 'r1:trip', rider = 'rider-1') => as(driver, 'start_trip', trip(id, rider), now)
+  const status = (id = 'r1:trip') => (db.prepare('SELECT status FROM trips WHERE id = ?').get(id) as { status: string } | undefined)?.status
+  const life = (id = 'r1:trip') => db.prepare('SELECT * FROM trip_lifecycle WHERE trip_id = ?').get(id) as Record<string, unknown> | undefined
+  const events = (id = 'r1:trip') => db.prepare('SELECT event, actor_role, reason_code, note, amount_cents FROM trip_lifecycle_events WHERE trip_id = ? AND rider_id = ? ORDER BY at, rowid').all(id, 'rider-1')
+  const phase = (id = 'r1', rider = 'rider-1') => (as(rider, 'get_my_trip_lifecycle', { request_id: id }) as { phase: string }[])[0]?.phase
+  const rows = (table: string) => count(db, table)
+  const toArrived = (at = NOW) => { advance('en_route', 'd1', at); advance('arrived', 'd1', at) }
+
+  it('runs request -> assignment -> arrival -> start -> completion with an audit trail', () => {
+    matched()
+    expect(phase()).toBe('scheduled')
+    advance('en_route', 'd1', NOW + 1000)
+    expect(phase()).toBe('en_route')
+    advance('arrived', 'd1', NOW + 2000)
+    expect(phase()).toBe('arrived')
+    start('d1', NOW + 3000)
+    expect(phase()).toBe('in_progress') // status stays arrived; the lifecycle knows it started
+    expect(status()).toBe('arrived')
+    advance('completed', 'd1', NOW + 4000)
+    expect(phase()).toBe('completed')
+    expect(life()).toMatchObject({ started_at: NOW + 3000, started_by: 'd1', ended_at: NOW + 4000, outcome: 'completed', cancel_fee_cents: 0 })
+    expect(events()).toEqual([
+      { event: 'started', actor_role: 'driver', reason_code: null, note: null, amount_cents: null },
+      { event: 'completed', actor_role: 'driver', reason_code: null, note: null, amount_cents: null },
+    ])
+    expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'completed' })
+    expect(db.prepare('SELECT status FROM dispatch_offers').get()).toEqual({ status: 'completed' })
+    expect((as('rider-1', 'get_my_trip_history', { trip_id: 'r1:trip' }) as { to_status: string }[]).map((h) => h.to_status)).toEqual(['scheduled', 'en_route', 'arrived', 'completed'])
+  })
+
+  it('rejects out-of-order and repeated transitions without writing audit rows', () => {
+    matched()
+    const snapshotOf = () => [rows('trip_transitions'), rows('trip_events'), rows('trip_lifecycle_events')]
+    start() // not arrived yet
+    advance('arrived') // skips en_route
+    advance('completed') // skips everything
+    expect(status()).toBe('scheduled')
+    expect(snapshotOf()).toEqual([1, 1, 0])
+    advance('en_route')
+    advance('en_route') // repeat
+    advance('completed') // not started
+    toArrived()
+    advance('completed') // arrived but never started
+    expect(status()).toBe('arrived')
+    start()
+    const afterStart = snapshotOf()
+    start() // repeat
+    advance('en_route') // backwards
+    expect(snapshotOf()).toEqual(afterStart)
+    advance('completed')
+    advance('completed') // repeat
+    start() // after the end
+    expect(events().map((e) => (e as { event: string }).event)).toEqual(['started', 'completed'])
+  })
+
+  it('the lifecycle actions belong to the assigned driver only', () => {
+    matched()
+    makeDriver('d2')
+    advance('en_route', 'd2') // another driver
+    advance('en_route', 'rider-1') // the rider
+    advance('en_route', 'ops')
+    expect(status()).toBe('scheduled')
+    toArrived()
+    start('d2'); start('rider-1'); start('ops')
+    expect(life()?.started_at ?? null).toBeNull()
+    for (const who of ['d2', 'rider-1', 'ops']) {
+      as(who, 'driver_cancel_trip', { ...trip(), reason_code: 'other' })
+      as(who, 'report_rider_no_show', trip(), NOW + 10 * MIN)
+    }
+    expect(status()).toBe('arrived')
+    expect(rows('trip_lifecycle_events')).toBe(0)
+    // Another rider's cancel_ride is scoped to their own requests.
+    as('rider-2', 'cancel_ride', { request_id: 'r1' })
+    as('rider-2', 'report_driver_no_show', { request_id: 'r1' }, NOW + 60 * MIN)
+    expect(status()).toBe('arrived')
+  })
+
+  it('ops-only actions are declared role-gated, and ops cannot act on trips they take part in', () => {
+    for (const name of ['ops_cancel_trip', 'ops_resolve_dispute', 'ops_list_disputes', 'ops_get_trip_timeline'])
+      expect(tool(name), name).toMatchObject({ auth: { required: true, app_roles: ['ops'] } })
+    for (const name of ['advance_trip', 'start_trip', 'driver_cancel_trip', 'report_rider_no_show', 'report_driver_no_show', 'cancel_ride', 'open_dispute'])
+      expect((tool(name) as unknown as { auth?: unknown }).auth, name).toBeUndefined()
+    matched('r1', 'ops-rider')
+    as('ops-rider', 'ops_cancel_trip', { ...trip('r1:trip', 'ops-rider'), note: 'x' }) // the rider is the ops user
+    expect(status()).toBe('scheduled')
+    as('d1', 'ops_cancel_trip', { ...trip('r1:trip', 'ops-rider'), note: 'x' }) // the driver is the ops user
+    expect(status()).toBe('scheduled')
+    expect(as('d1', 'ops_get_trip_timeline', trip('r1:trip', 'ops-rider'))).toEqual([])
+    expect(as('ops-rider', 'ops_get_trip_timeline', trip('r1:trip', 'ops-rider'))).toEqual([])
+  })
+
+  describe('rider cancellation', () => {
+    it('is free and leaves no trip record before a driver is assigned', () => {
+      as('rider-1', 'save_ride', { ...rideToRecords(ride('r1')) })
+      as('rider-1', 'request_dispatch', { request_id: 'r1' })
+      expect(as('rider-1', 'preview_cancellation', { request_id: 'r1' })).toEqual([])
+      as('rider-1', 'cancel_ride', { request_id: 'r1', reason_code: 'changed_plans' })
+      expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'cancelled' })
+      expect(as('rider-1', 'get_dispatch_status', { request_id: 'r1' })).toMatchObject([{ status: 'cancelled' }])
+      expect(rows('trip_lifecycle')).toBe(0)
+    })
+
+    it('charges by policy: grace, late, and arrived, capped at the fare, with the reason recorded', () => {
+      const fee = (at: number, fare: number, arrived: boolean) => {
+        db = new DatabaseSync(':memory:')
+        migrate(db, new Set())
+        matched('r1', 'rider-1', 'd1', NOW, fare)
+        if (arrived) toArrived(NOW + 1000)
+        const preview = as('rider-1', 'preview_cancellation', { request_id: 'r1' }, at)[0]
+        as('rider-1', 'cancel_ride', { request_id: 'r1', reason_code: 'wait_too_long', note: '  too slow  ' }, at)
+        return { preview, row: life() }
+      }
+      expect(fee(NOW + 120_000, 1500, false)).toMatchObject({ preview: { fee_cents: 0, policy: 'free_grace' }, row: { cancel_fee_cents: 0, fee_policy: 'free_grace' } })
+      expect(fee(NOW + 120_001, 1500, false)).toMatchObject({ preview: { fee_cents: 500, policy: 'late_cancel' }, row: { cancel_fee_cents: 500, fee_policy: 'late_cancel' } })
+      expect(fee(NOW + 120_001, 300, false).row).toMatchObject({ cancel_fee_cents: 300 }) // capped at the fare
+      expect(fee(NOW + MIN, 1500, true)).toMatchObject({ preview: { fee_cents: 800, policy: 'arrived_cancel' }, row: { cancel_fee_cents: 800, fee_policy: 'arrived_cancel', outcome: 'rider_cancelled', cancelled_by_role: 'rider', cancel_code: 'wait_too_long', cancel_note: 'too slow' } })
+      expect(events()).toEqual([{ event: 'cancelled', actor_role: 'rider', reason_code: 'wait_too_long', note: 'too slow', amount_cents: 800 }])
+      expect(status()).toBe('cancelled')
+      expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'cancelled' })
+      expect(db.prepare('SELECT status FROM dispatch_offers').get()).toEqual({ status: 'cancelled' })
+      expect(db.prepare("SELECT metadata FROM trip_transitions WHERE to_status = 'cancelled'").get()).toEqual({ metadata: expect.stringContaining('"fee_policy":"arrived_cancel"') })
+    })
+
+    it('normalises unknown reasons to other and caps notes at 200 characters', () => {
+      matched()
+      as('rider-1', 'cancel_ride', { request_id: 'r1', reason_code: 'because', note: 'x'.repeat(500) })
+      expect(life()).toMatchObject({ cancel_code: 'other' })
+      expect(String(life()?.cancel_note)).toHaveLength(200)
+    })
+
+    it('cancelling twice records one cancellation', () => {
+      matched()
+      as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + 1)
+      as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + 2)
+      expect(rows('trip_lifecycle_events')).toBe(1)
+      expect(db.prepare("SELECT COUNT(*) AS n FROM trip_transitions WHERE to_status = 'cancelled'").get()).toEqual({ n: 1 })
+    })
+
+    it('is refused once the trip has started, and never rewrites a completed trip', () => {
+      matched()
+      toArrived()
+      start()
+      as('rider-1', 'cancel_ride', { request_id: 'r1' })
+      expect(status()).toBe('arrived')
+      expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'matched' })
+      expect(db.prepare('SELECT status FROM dispatch_offers').get()).toEqual({ status: 'accepted' })
+      advance('completed')
+      as('rider-1', 'cancel_ride', { request_id: 'r1' }) // e.g. "delete" from the home list
+      expect(status()).toBe('completed')
+      expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'completed' })
+      expect(life()).toMatchObject({ outcome: 'completed' })
+    })
+  })
+
+  describe('driver cancellation and no-shows', () => {
+    it('driver cancel records a validated reason, charges the rider nothing and frees the driver', () => {
+      matched()
+      as('d1', 'driver_cancel_trip', { ...trip(), reason_code: 'safety', note: 'unsafe pickup' }, NOW + 5 * MIN)
+      expect(life()).toMatchObject({ outcome: 'driver_cancelled', cancelled_by_role: 'driver', cancel_code: 'safety', cancel_note: 'unsafe pickup', cancel_fee_cents: 0, fee_policy: 'driver_cancelled' })
+      expect(status()).toBe('cancelled')
+      expect(db.prepare('SELECT status FROM ride_requests').get()).toEqual({ status: 'cancelled' })
+      as('rider-2', 'save_ride', { ...rideToRecords(ride('r2')) })
+      as('rider-2', 'request_dispatch', { request_id: 'r2' })
+      as('rider-2', 'dispatch_tick', { request_id: 'r2' })
+      expect(as('d1', 'list_my_offers')).toMatchObject([{ request_id: 'r2' }]) // lock released
+    })
+
+    it('uses the driver reason list and refuses to cancel a started trip', () => {
+      matched()
+      as('d1', 'driver_cancel_trip', { ...trip(), reason_code: 'changed_plans' }) // a rider code
+      expect(life()).toMatchObject({ cancel_code: 'other' })
+      db = new DatabaseSync(':memory:'); migrate(db, new Set())
+      matched(); toArrived(); start()
+      as('d1', 'driver_cancel_trip', { ...trip(), reason_code: 'safety' })
+      expect(status()).toBe('arrived')
+    })
+
+    it('the driver can report a rider no-show only after waiting 5 minutes at the pickup', () => {
+      matched('r1', 'rider-1', 'd1', NOW, 1500)
+      as('d1', 'report_rider_no_show', trip(), NOW + 10 * MIN) // not arrived
+      expect(status()).toBe('scheduled')
+      toArrived(NOW + MIN)
+      as('d1', 'report_rider_no_show', trip(), NOW + MIN + 5 * MIN - 1)
+      expect(status()).toBe('arrived')
+      as('d1', 'report_rider_no_show', { ...trip(), note: 'called twice' }, NOW + MIN + 5 * MIN)
+      expect(status()).toBe('cancelled')
+      expect(life()).toMatchObject({ outcome: 'rider_no_show', cancel_fee_cents: 800, fee_policy: 'rider_no_show', cancelled_by_role: 'driver' })
+      expect(events()).toEqual([{ event: 'no_show', actor_role: 'driver', reason_code: 'rider_no_show', note: 'called twice', amount_cents: 800 }])
+      expect(db.prepare('SELECT status FROM dispatch_offers').get()).toEqual({ status: 'cancelled' })
+    })
+
+    it('cannot report a no-show after the trip has started', () => {
+      matched(); toArrived(); start()
+      as('d1', 'report_rider_no_show', trip(), NOW + 30 * MIN)
+      expect(status()).toBe('arrived')
+    })
+
+    it('the rider can report a driver no-show only after 15 minutes without arrival', () => {
+      matched()
+      as('rider-1', 'report_driver_no_show', { request_id: 'r1' }, NOW + 15 * MIN - 1)
+      expect(status()).toBe('scheduled')
+      as('rider-1', 'report_driver_no_show', { request_id: 'r1', note: 'never came' }, NOW + 15 * MIN)
+      expect(status()).toBe('cancelled')
+      expect(life()).toMatchObject({ outcome: 'driver_no_show', cancel_fee_cents: 0, fee_policy: 'driver_fault', cancelled_by_role: 'rider' })
+      db = new DatabaseSync(':memory:'); migrate(db, new Set())
+      matched(); toArrived(NOW + 1000)
+      as('rider-1', 'report_driver_no_show', { request_id: 'r1' }, NOW + 60 * MIN) // the driver did arrive
+      expect(status()).toBe('arrived')
+    })
+  })
+
+  describe('operations', () => {
+    it('cancels a trip in progress with a mandatory note and a capped fee', () => {
+      matched(); toArrived(); start()
+      as('ops', 'ops_cancel_trip', { ...trip(), note: '  ' }, NOW + 1) // blank note
+      expect(status()).toBe('arrived')
+      as('ops', 'ops_cancel_trip', { ...trip(), note: 'safety incident', fee_cents: 99_999 }, NOW + 2)
+      expect(status()).toBe('cancelled')
+      expect(life()).toMatchObject({ outcome: 'ops_cancelled', cancelled_by_role: 'ops', cancel_fee_cents: 1500, fee_policy: 'ops_set' })
+      expect(events().at(-1)).toEqual({ event: 'cancelled', actor_role: 'ops', reason_code: 'ops_cancelled', note: 'safety incident', amount_cents: 1500 })
+      expect(db.prepare('SELECT status FROM dispatch_offers').get()).toEqual({ status: 'cancelled' })
+    })
+
+    it('does not touch finished trips and never charges a negative fee', () => {
+      matched(); toArrived(); start(); advance('completed')
+      as('ops', 'ops_cancel_trip', { ...trip(), note: 'late' })
+      expect(status()).toBe('completed')
+      db = new DatabaseSync(':memory:'); migrate(db, new Set())
+      matched()
+      as('ops', 'ops_cancel_trip', { ...trip(), note: 'dup', fee_cents: -50 })
+      expect(life()).toMatchObject({ cancel_fee_cents: 0 })
+    })
+
+    it('reads a trip timeline of transitions and lifecycle events in order', () => {
+      matched(); toArrived(NOW + 1000); start('d1', NOW + 2000); advance('completed', 'd1', NOW + 3000)
+      const timeline = as('ops', 'ops_get_trip_timeline', trip()) as { kind: string; name: string; at: number }[]
+      expect(timeline.map((t) => `${t.kind}:${t.name}`)).toEqual(['transition:scheduled', 'transition:en_route', 'transition:arrived', 'event:started', 'transition:completed', 'event:completed'])
+    })
+  })
+
+  describe('disputes', () => {
+    const dispute = (who: string, code: string, now = NOW + 140_000, note = 'n') => as(who, 'open_dispute', { ...trip(), reason_code: code, note }, now)
+    const disputes = () => db.prepare('SELECT opened_by, opened_role, reason_code, status FROM trip_disputes ORDER BY opened_by').all()
+    const finishTrip = () => { matched(); toArrived(); start('d1', NOW + 1); advance('completed', 'd1', NOW + 2) }
+
+    it('lets the rider and the assigned driver each dispute a finished trip once, with role-specific codes', () => {
+      finishTrip()
+      dispute('rider-1', 'overcharged')
+      dispute('rider-1', 'route') // repeat
+      dispute('d1', 'rider_conduct')
+      dispute('d1', 'damage')
+      expect(disputes()).toEqual([
+        { opened_by: 'd1', opened_role: 'driver', reason_code: 'rider_conduct', status: 'open' },
+        { opened_by: 'rider-1', opened_role: 'rider', reason_code: 'overcharged', status: 'open' },
+      ])
+      expect(events().map((e) => (e as { event: string }).event)).toEqual(['started', 'completed', 'dispute_opened', 'dispute_opened'])
+      expect(as('rider-1', 'list_my_disputes')).toMatchObject([{ reason_code: 'overcharged', status: 'open' }])
+      expect(as('rider-1', 'get_my_trip_lifecycle', { request_id: 'r1' })).toMatchObject([{ disputed: 1 }])
+    })
+
+    it('rejects wrong-role codes, strangers, and trips that are still open', () => {
+      matched()
+      dispute('rider-1', 'overcharged') // still open
+        toArrived(); start('d1', NOW + 1); advance('completed', 'd1', NOW + 2)
+      dispute('rider-1', 'rider_conduct') // driver-only code
+      dispute('d1', 'driver_conduct') // rider-only code
+      dispute('d2', 'other')
+      dispute('rider-2', 'other')
+      dispute('ops', 'other')
+      expect(disputes()).toEqual([])
+    })
+
+    it('expires 7 days after the trip ended', () => {
+      finishTrip()
+      dispute('rider-1', 'overcharged', NOW + 7 * 24 * 60 * MIN + 3)
+      expect(disputes()).toEqual([])
+      dispute('rider-1', 'overcharged', NOW + 7 * 24 * 60 * MIN + 2)
+      expect(disputes()).toHaveLength(1)
+    })
+
+    it('covers cancelled trips too, and ops resolve with a note, once', () => {
+      matched()
+      as('rider-1', 'cancel_ride', { request_id: 'r1', reason_code: 'wrong_pickup' }, NOW + 130_000)
+      dispute('rider-1', 'cancel_fee')
+      const open = () => as('ops', 'ops_list_disputes') as Record<string, unknown>[]
+      expect(open()).toMatchObject([{ opened_by: 'rider-1', reason_code: 'cancel_fee', outcome: 'rider_cancelled', cancel_fee_cents: 500 }])
+      const resolve = (extra: Record<string, unknown>, who = 'ops') => as(who, 'ops_resolve_dispute', { ...trip(), opened_by: 'rider-1', decision: 'upheld', note: 'ok', waive_fee: 0, ...extra }, NOW + 200_000)
+      resolve({ note: '  ' }); resolve({ decision: 'maybe' }); resolve({ opened_by: 'nobody' })
+      expect(open()).toHaveLength(1)
+      resolve({ waive_fee: 1, note: 'driver was late' })
+      expect(open()).toEqual([])
+      expect(db.prepare('SELECT status, decision, resolution_note, resolved_by, fee_waived FROM trip_disputes').get()).toEqual({ status: 'resolved', decision: 'upheld', resolution_note: 'driver was late', resolved_by: 'ops', fee_waived: 1 })
+      expect(life()).toMatchObject({ cancel_fee_cents: 0, fee_policy: 'ops_waived' })
+      expect(events().map((e) => (e as { event: string }).event)).toEqual(['cancelled', 'dispute_opened', 'fee_waived', 'dispute_resolved'])
+      resolve({ decision: 'rejected', note: 'second try' }) // already resolved
+      expect(db.prepare('SELECT decision FROM trip_disputes').get()).toEqual({ decision: 'upheld' })
+      expect(as('rider-1', 'list_my_disputes')).toMatchObject([{ status: 'resolved', decision: 'upheld', resolution_note: 'driver was late', fee_waived: 1 }])
+    })
+
+    it('a rejected dispute leaves the fee alone; ops cannot resolve disputes on their own trips', () => {
+      matched()
+      as('rider-1', 'cancel_ride', { request_id: 'r1' }, NOW + 130_000)
+      dispute('rider-1', 'cancel_fee')
+      as('d1', 'ops_resolve_dispute', { ...trip(), opened_by: 'rider-1', decision: 'upheld', note: 'x', waive_fee: 1 }) // the driver is the ops user
+      expect(db.prepare('SELECT status FROM trip_disputes').get()).toEqual({ status: 'open' })
+      as('ops', 'ops_resolve_dispute', { ...trip(), opened_by: 'rider-1', decision: 'rejected', note: 'policy applied', waive_fee: 1 })
+      expect(life()).toMatchObject({ cancel_fee_cents: 500, fee_policy: 'late_cancel' })
+      expect(db.prepare('SELECT fee_waived FROM trip_disputes').get()).toEqual({ fee_waived: 0 })
+    })
+  })
+
+  describe('duplicate requests', () => {
+    const quoteAndAccept = (quoteId: string, rideId: string, now = NOW) => {
+      as('rider-1', 'create_quote', { quote_id: quoteId, vehicle_class: 'share', pickup_label: 'A', pickup_lat: SYDNEY.lat, pickup_lng: SYDNEY.lng, dropoff_label: 'B', dropoff_lat: SYDNEY.lat + 0.045, dropoff_lng: SYDNEY.lng, distance_m: 5000, duration_s: 600 }, now)
+      as('rider-1', 'accept_quote', { quote_id: quoteId, ride_id: rideId, client_record: '{}', pickup_lat: SYDNEY.lat, pickup_lng: SYDNEY.lng, dropoff_lat: SYDNEY.lat + 0.045, dropoff_lng: SYDNEY.lng, distance_m: 5000 }, now)
+      return (as('rider-1', 'get_quote', { quote_id: quoteId })[0] as { status: string }).status
+    }
+
+    it('refuses a second on-demand request while one is searching, matched or in progress', () => {
+      makeDriver('d1')
+      expect(quoteAndAccept('q1', 'a')).toBe('accepted')
+      expect(quoteAndAccept('q2', 'b')).toBe('pending') // refused; the quote is not consumed
+      expect(rows('ride_requests')).toBe(1)
+      as('rider-1', 'dispatch_tick', { request_id: 'a' })
+      as('d1', 'accept_offer', { rider_id: 'rider-1', request_id: 'a' })
+      makeDriver('d2') // a free driver exists, so only the active-ride rule can be refusing
+      expect(quoteAndAccept('q3', 'c')).toBe('pending')
+      as('rider-1', 'save_ride', { ...rideToRecords(ride('direct')) })
+      as('rider-1', 'request_dispatch', { request_id: 'direct' })
+      expect(as('rider-1', 'get_dispatch_status', { request_id: 'direct' })).toEqual([])
+    })
+
+    it('allows a new request once the previous trip is finished, cancelled, or its search timed out', () => {
+      makeDriver('d1')
+      quoteAndAccept('q1', 'a')
+      expect(quoteAndAccept('q2', 'b', NOW + 120_001)).toBe('accepted') // 'a' stopped searching long ago
+      as('rider-1', 'cancel_ride', { request_id: 'b' }, NOW + 130_000)
+      expect(quoteAndAccept('q3', 'c', NOW + 140_000)).toBe('accepted')
+    })
+
+    it('allows a new request after a completed trip', () => {
+      makeDriver('d1')
+      quoteAndAccept('q1', 'a')
+      as('rider-1', 'dispatch_tick', { request_id: 'a' })
+      as('d1', 'accept_offer', { rider_id: 'rider-1', request_id: 'a' })
+      for (const to of ['en_route', 'arrived']) as('d1', 'advance_trip', { rider_id: 'rider-1', trip_id: 'a:trip', to_status: to })
+      as('d1', 'start_trip', { rider_id: 'rider-1', trip_id: 'a:trip' })
+      as('d1', 'advance_trip', { rider_id: 'rider-1', trip_id: 'a:trip', to_status: 'completed' })
+      expect(quoteAndAccept('q2', 'b')).toBe('accepted')
+    })
   })
 })

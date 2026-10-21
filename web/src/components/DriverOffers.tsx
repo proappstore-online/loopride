@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useLocation } from 'wouter'
 import { acceptOffer, declineOffer, loadOffers, type Offer } from '../lib/dispatch'
 import { showToast } from '../lib/toast'
 
@@ -8,6 +9,7 @@ const POLL_MS = 5000
 export default function DriverOffers() {
   const [offers, setOffers] = useState<Offer[]>([])
   const [now, setNow] = useState(() => Date.now())
+  const [, setLocation] = useLocation()
 
   const refresh = useCallback(() => loadOffers().then(setOffers, () => undefined), [])
   useEffect(() => {
@@ -53,7 +55,10 @@ export default function DriverOffers() {
               <button onClick={() => respond(o, false)} className="rounded-xl border border-[var(--line)] px-4 py-1.5 text-xs font-bold text-[var(--ink)]">Decline</button>
             </div>
           ) : (
-            <p className="mt-2 text-xs font-bold text-[var(--accent)]">Assigned to you. Open the trip to start.</p>
+            <div className="mt-3 flex items-center gap-3">
+              <p className="text-xs font-bold text-[var(--accent)]">Assigned to you.</p>
+              <button onClick={() => setLocation(`/driver/trip/${o.riderId}/${o.requestId}`)} className="rounded-xl bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-white">Open trip</button>
+            </div>
           )}
         </li>
       ))}

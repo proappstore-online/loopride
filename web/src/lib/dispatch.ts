@@ -63,14 +63,6 @@ export async function runDispatch(
   }
 }
 
-export type TripState = 'scheduled' | 'en_route' | 'arrived' | 'completed' | 'cancelled'
-
-/** The DB trip status for a ride (set by the matched driver), or null before a driver accepts. */
-export async function loadTripStatus(rideId: string): Promise<TripState | null> {
-  const rows = await call<{ id: string; status: TripState }[]>('list_my_trips', { limit: 50 })
-  return rows.find((t) => t.id === `${rideId}:trip`)?.status ?? null
-}
-
 // ---- driver ----
 
 export interface Offer {

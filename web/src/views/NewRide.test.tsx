@@ -5,8 +5,8 @@ import userEvent from '@testing-library/user-event'
 const { geocode, firstMatch, fetchRoute } = vi.hoisted(() => ({ geocode: vi.fn(), firstMatch: vi.fn(), fetchRoute: vi.fn() }))
 vi.mock('../lib/maps', () => ({ geocode, firstMatch }))
 vi.mock('../lib/routing', () => ({ fetchRoute }))
-const { authState, actions } = vi.hoisted(() => ({ authState: { user: null as { id: string } | null }, actions: { call: vi.fn() } }))
-vi.mock('../lib/app', () => ({ app: { auth: { token: null, onChange: () => () => undefined }, kv: { set: vi.fn(), get: vi.fn() }, actions } }))
+const { authState, actions, signIn } = vi.hoisted(() => ({ authState: { user: null as { id: string } | null }, actions: { call: vi.fn() }, signIn: vi.fn() }))
+vi.mock('../lib/app', () => ({ app: { auth: { token: null, onChange: () => () => undefined, signIn }, kv: { set: vi.fn(), get: vi.fn() }, actions } }))
 vi.mock('../lib/useAuth', () => ({ useAuth: () => ({ user: authState.user, loading: false, signOut: vi.fn() }) }))
 
 import NewRide from './NewRide'
@@ -18,41 +18,45 @@ function mount(path = '/new') { const wrap = renderWithRouter(<NewRide />, path)
 beforeEach(() => {
   authState.user = null
   actions.call.mockReset()
+  signIn.mockReset()
 })
 
-describe('NewRide (signed out: on-device preview)', () => {
-  it('says it is a preview and points to sign-in', () => {
+describe('NewRide (signed out)', () => {
+  it('asks the rider to sign in to ride now, with no preview, estimate or simulated driver', async () => {
     mount()
-    expect(screen.getByRole('note')).toHaveTextContent(/Preview only. Sign in to get live quotes/)
+    expect(screen.getByRole('note')).toHaveTextContent(/Sign in to ride now/)
     expect(screen.queryByRole('button', { name: 'Get quotes' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Request/ })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Estimate shown before booking/)).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }))
+    expect(signIn).toHaveBeenCalledWith('google')
+    expect(listRides()).toEqual([])
   })
 
-  it('requires a pickup and destination before a ride can be requested', async () => {
-    mount()
-    const request = screen.getByRole('button', { name: /Request RideShare/ })
-    expect(request).toBeDisabled()
-    await userEvent.type(screen.getByPlaceholderText('Enter pickup'), 'Home')
-    await userEvent.type(screen.getByPlaceholderText('Where are you going?'), 'Airport')
-    expect(request).toBeEnabled()
-  })
-
-  it('lets a rider select a higher-capacity vehicle', async () => {
-    mount()
-    await userEvent.click(screen.getByRole('button', { name: /RideShare XL/ }))
-    expect(screen.getByRole('button', { name: /Request RideShare XL/ })).toBeInTheDocument()
-  })
-
-  it('creates an immediate ride and opens live tracking', async () => {
+  it('still lets a signed-out rider reserve a ride for later, with no driver attached', async () => {
     firstMatch.mockReset()
     firstMatch.mockResolvedValueOnce({ lat: -33.8, lng: 151.2 }).mockResolvedValueOnce({ lat: -33.85, lng: 151.21 })
     fetchRoute.mockReset()
     fetchRoute.mockResolvedValueOnce({ coordinates: [[151.2, -33.8], [151.21, -33.85]], distanceMeters: 1234, durationSeconds: 240 })
     const wrap = mount()
+    await userEvent.click(screen.getByRole('button', { name: 'Later' }))
     await userEvent.type(screen.getByPlaceholderText('Enter pickup'), 'Home')
     await userEvent.type(screen.getByPlaceholderText('Where are you going?'), 'Airport')
-    await userEvent.click(screen.getByRole('button', { name: /Request RideShare/ }))
-    await waitFor(() => expect(wrap.location()).toMatch(/^\/trip\//))
-    expect(listRides()[0]).toMatchObject({ bookingType: 'now', driverName: 'Jordan', vehicle: 'share', etaMinutes: 4, fareCents: 1180 })
+    await userEvent.click(screen.getByRole('button', { name: /RideShare XL/ }))
+    await userEvent.click(screen.getByRole('button', { name: 'Reserve ride' }))
+    await waitFor(() => expect(wrap.location()).toBe('/'))
+    expect(listRides()[0]).toMatchObject({ bookingType: 'scheduled', driverName: '', vehicle: 'xl', pickup: 'Home' })
+    expect(listRides()[0].driverPlate).toBeUndefined()
+  })
+
+  it('requires a pickup and destination before a reservation can be saved', async () => {
+    mount()
+    await userEvent.click(screen.getByRole('button', { name: 'Later' }))
+    const reserve = screen.getByRole('button', { name: 'Reserve ride' })
+    expect(reserve).toBeDisabled()
+    await userEvent.type(screen.getByPlaceholderText('Enter pickup'), 'Home')
+    await userEvent.type(screen.getByPlaceholderText('Where are you going?'), 'Airport')
+    expect(reserve).toBeEnabled()
   })
 
   it('offers a recurring routine as a secondary mode', async () => {

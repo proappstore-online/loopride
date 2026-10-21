@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import Home from './Home'
-import { saveRide } from '../storage'
+import { listRides, saveRide } from '../storage'
 import type { RecurringRide } from '../types'
 import { renderWithRouter } from '../../test/router'
 
@@ -37,5 +37,13 @@ describe('Home', () => {
     const wrap = mount()
     await userEvent.click(screen.getByText('Opera House'))
     expect(wrap.location()).toBe('/trip/ride-1')
+  })
+
+  it('sends a matched ride to its trip page to cancel (reason and fee first) instead of deleting it', async () => {
+    saveRide({ ...ride, id: 'live-1', quoteId: 'q1' })
+    const wrap = mount()
+    await userEvent.click(screen.getByRole('button', { name: 'Manage ride' }))
+    expect(wrap.location()).toBe('/trip/live-1')
+    expect(listRides().map((r) => r.id)).toContain('live-1')
   })
 })

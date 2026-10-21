@@ -255,6 +255,71 @@ estimate), now labelled "Preview only". Live quotes and dispatch need an account
 driver ETA in the quote (SQLite has no `sqrt` for a distance-based ETA);
 server-side geocoding or routing (the platform maps API is called from the client).
 
+## Trip lifecycle and permissions (issue #7)
+
+Migration `0007_trip_lifecycle`: `trip_lifecycle` (one row per trip: start time,
+outcome, who cancelled, reason, fee and fee policy), `trip_lifecycle_events`
+(append-only: started, completed, cancelled, no_show, fee_waived,
+dispute_opened, dispute_resolved) and `trip_disputes`. Client:
+`web/src/lib/tripLifecycle.ts`, `views/Trip.tsx` (rider), `views/DriverTrip.tsx`
+(driver).
+
+**State machine** (enforced in SQL; `trips.status` keeps its five values and
+"in progress" is `status = arrived` with `trip_lifecycle.started_at` set):
+
+`scheduled -> en_route -> arrived -> [start_trip] -> completed`, and
+`scheduled | en_route | arrived -> cancelled`. `completed` and `cancelled` are
+final. A step out of order, a repeat, or a call by someone not entitled changes
+nothing **and writes no audit row**; the call does not fail, so clients re-read
+the state (`get_my_trip_lifecycle`, `get_driver_trip`) to confirm. Completing
+requires the trip to have been started. A rider can have only one active
+on-demand request: `request_dispatch` and `accept_quote` are refused while another
+is searching (within its 2 minute window) or matched and unfinished.
+
+**Who can do what** (each action checks the caller against the trip itself):
+
+| Actor | Actions |
+|---|---|
+| Rider (owns the ride) | `cancel_ride` (before start), `report_driver_no_show`, `open_dispute`, reads |
+| Assigned driver (via `drivers.user_id`) | `advance_trip` (en_route, arrived, completed), `start_trip`, `driver_cancel_trip`, `report_rider_no_show`, `open_dispute`, reads |
+| Ops (PAS app role `ops`; not the rider or driver of that trip) | `ops_cancel_trip` (any unfinished trip, including one in progress), `ops_resolve_dispute`, `ops_list_disputes`, `ops_get_trip_timeline` |
+
+Once a trip has started the rider and driver can no longer cancel it; only ops can.
+A rider "deleting" a finished ride no longer rewrites its history.
+
+**Cancellation reasons, fees and no-shows.** Reason codes are validated per role
+(anything else is stored as `other`): rider `changed_plans, wait_too_long,
+wrong_pickup, found_other, other`; driver `rider_unreachable, vehicle_issue,
+safety, too_far, other`. The fee policy is a hook only (it is recorded, nothing
+is charged): rider cancels are free before assignment and within 2 minutes of it;
+later 5.00; once the driver has arrived 8.00, always capped at the fare. A driver
+cancel costs the rider nothing and is recorded `driver_cancelled`. Driver-reported
+rider no-show (after 5 minutes at the pickup): 8.00, outcome `rider_no_show`.
+Rider-reported driver no-show (15 minutes after assignment, driver not arrived):
+no fee, outcome `driver_no_show`. Ops cancels with a mandatory note and an
+optional fee. `preview_cancellation` shows the rider the fee before they confirm.
+Each ending is stored in `trip_lifecycle` (`outcome`, `cancelled_by_role`,
+`cancel_code`, `cancel_note`, `cancel_fee_cents`, `fee_policy`), in
+`trip_lifecycle_events`, and as a `trip_transitions` row with the actor.
+
+**Disputes.** The rider or the assigned driver may dispute a completed or
+cancelled trip within 7 days, once each, with a role-specific code. Ops resolve
+with `upheld` or `rejected` and a mandatory note; upholding may waive the
+cancellation fee (`fee_policy = ops_waived`, a `fee_waived` event). Resolved
+disputes are final.
+
+**Simulation removed.** The rider "Preview driver arrival" / "Driver arrived" /
+"Trip complete" buttons, the arrival countdown and fake driver, the driver's
+"Step +10% (sim)" and sim/real position switch, the "Jordan" demo driver, and the
+share-link driver import are gone. Signed-out riders can no longer "ride now"
+(they are asked to sign in); reservations and routines still work signed out.
+The driver trip screen publishes real GPS only.
+
+**Known gaps.** Live position pings still travel over the unauthenticated per-ride
+PAS room, so anyone who knows a ride id could spoof them; they do not affect
+trip state. Fees are recorded but never charged. Ops UI for cancel/dispute
+actions is not built (the actions exist and are role-gated).
+
 ## Migrating legacy rides
 
 Existing rides live in localStorage (`loopride.rides.v2`, which already absorbs

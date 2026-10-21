@@ -7,6 +7,7 @@ import { firstMatch, geocode } from '../lib/maps'
 import { fetchRoute } from '../lib/routing'
 import { LIMITS } from '../lib/constants'
 import { useAuth } from '../lib/useAuth'
+import { app } from '../lib/app'
 import QuotePicker from '../components/QuotePicker'
 
 interface GeoSuggestion { lat: number; lng: number; displayName: string; shortName: string }
@@ -40,7 +41,7 @@ export default function NewRide() {
   const [error, setError] = useState<string | null>(null)
   const selectedVehicle = useMemo(() => VEHICLES.find((item) => item.id === vehicle)!, [vehicle])
   const estimate = Math.round(1180 * selectedVehicle.multiplier)
-  // Signed-in on-demand requests use server quotes and real dispatch. Signed-out, the on-device preview below is unchanged.
+  // On-demand rides use server quotes and real dispatch, so they need an account. Reservations and routines work signed out.
   const live = mode === 'now' && Boolean(auth.user)
   const valid = pickup.trim() && dropoff.trim() && (mode !== 'recurring' || days.length > 0)
 
@@ -49,7 +50,7 @@ export default function NewRide() {
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
-    if (!valid || saving || live) return
+    if (!valid || saving || mode === 'now') return
     setSaving(true)
     setError(null)
     try {
@@ -57,34 +58,28 @@ export default function NewRide() {
       const cleanDropoff = dropoff.trim().slice(0, LIMITS.dropoffChars)
       const [resolvedPickup, resolvedDropoff] = await Promise.all([ensureCoord(cleanPickup, pickupCoord), ensureCoord(cleanDropoff, dropoffCoord)])
       let routePolyline: [number, number][] | undefined
-      let etaMinutes = 6
       if (resolvedPickup && resolvedDropoff) {
         try {
-          const route = await fetchRoute(resolvedPickup, resolvedDropoff)
-          routePolyline = route.coordinates
-          etaMinutes = Math.max(3, Math.round(route.durationSeconds / 60))
-        } catch { /* a usable ride can still be requested without a cached route */ }
+          routePolyline = (await fetchRoute(resolvedPickup, resolvedDropoff)).coordinates
+        } catch { /* a usable booking can still be saved without a cached route */ }
       }
-      const immediate = mode === 'now'
       const ride: RecurringRide = {
         id: crypto.randomUUID(), pickup: cleanPickup, pickupCoord: resolvedPickup,
         dropoff: cleanDropoff, dropoffCoord: resolvedDropoff,
         days: mode === 'recurring' ? days : [], time,
-        driverName: immediate ? 'Jordan' : '', paused: false, createdAt: Date.now(),
+        driverName: '', paused: false, createdAt: Date.now(),
         requestedAt: Date.now(), bookingType: mode, vehicle, fareCents: estimate,
-        etaMinutes: immediate ? etaMinutes : undefined,
-        driverPlate: immediate ? 'RS-482' : undefined, driverRating: immediate ? 4.9 : undefined,
         scheduledFor: mode === 'scheduled' ? `${date}T${time}` : undefined, routePolyline,
       }
       saveRide(ride)
-      setLocation(immediate ? `/trip/${ride.id}` : '/')
+      setLocation('/')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'We could not request this ride')
       setSaving(false)
     }
   }
 
-  const action = mode === 'now' ? `Request ${selectedVehicle.label} · $${(estimate / 100).toFixed(2)}` : mode === 'scheduled' ? 'Reserve ride' : 'Save routine'
+  const action = mode === 'scheduled' ? 'Reserve ride' : 'Save routine'
 
   return <div className="mx-auto min-h-[100dvh] max-w-2xl px-4 py-5 sm:px-6">
     <header className="mb-6 flex items-center gap-4"><button onClick={() => setLocation('/')} className="grid h-10 w-10 place-items-center rounded-full border border-[var(--line)] text-[var(--ink)] hover:bg-[var(--accent-soft)]" aria-label="Back">←</button><div><h1 className="text-xl font-extrabold tracking-[-0.05em] text-[var(--ink)]">Plan your ride</h1><p className="mt-0.5 text-xs text-[var(--muted)]">Choose a destination and we’ll do the matching.</p></div></header>
@@ -98,13 +93,22 @@ export default function NewRide() {
       </section>
 
       {live && <QuotePicker pickup={pickup} pickupCoord={pickupCoord} dropoff={dropoff} dropoffCoord={dropoffCoord} onAccepted={(ride) => { saveRide(ride); setLocation(`/trip/${ride.id}`) }} />}
-      {mode === 'now' && !auth.loading && !auth.user && <p role="note" className="rounded-xl bg-[var(--accent-soft)] px-4 py-3 text-xs leading-5 text-[var(--ink)]">Preview only. Sign in to get live quotes, see nearby drivers and have a real driver matched.</p>}
-      {!live && mode !== 'recurring' && <section><p className="mb-3 text-xs font-bold uppercase tracking-[0.14em] text-[var(--muted)]">Choose a ride</p><div className="space-y-2">{VEHICLES.map((item) => <button type="button" key={item.id} onClick={() => setVehicle(item.id)} className={`flex w-full items-center gap-4 rounded-2xl border p-4 text-left transition ${vehicle === item.id ? 'border-[var(--accent)] bg-[var(--accent-soft)]' : 'border-[var(--line)] bg-[var(--paper)]'}`}><span className="grid h-10 w-12 place-items-center rounded-xl bg-[var(--ink)] text-xl text-white">{item.id === 'xl' ? '▰' : item.id === 'comfort' ? '◒' : '◐'}</span><span className="flex-1"><span className="block text-sm font-extrabold text-[var(--ink)]">{item.label}</span><span className="mt-0.5 block text-xs text-[var(--muted)]">{item.description}</span></span><span className="text-sm font-bold text-[var(--ink)]">${(1180 * item.multiplier / 100).toFixed(2)}</span></button>)}</div></section>}
+      {mode === 'now' && !auth.loading && !auth.user && (
+        <section role="note" className="space-y-3 rounded-2xl bg-[var(--accent-soft)] p-4">
+          <p className="text-sm font-extrabold text-[var(--ink)]">Sign in to ride now</p>
+          <p className="text-xs leading-5 text-[var(--ink)]">On-demand rides are matched with real nearby drivers and priced with a live quote, so they need an account. You can still reserve a ride for later or save a routine without signing in.</p>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => app.auth.signIn('google')} className="rounded-xl border border-[var(--line)] bg-white px-4 py-2 text-xs font-bold text-[var(--ink)]">Sign in with Google</button>
+            <button type="button" onClick={() => app.auth.signIn('github')} className="rounded-xl border border-[var(--line)] bg-white px-4 py-2 text-xs font-bold text-[var(--ink)]">Sign in with GitHub</button>
+          </div>
+        </section>
+      )}
+      {mode === 'scheduled' && <section><p className="mb-3 text-xs font-bold uppercase tracking-[0.14em] text-[var(--muted)]">Choose a ride</p><div className="space-y-2">{VEHICLES.map((item) => <button type="button" key={item.id} onClick={() => setVehicle(item.id)} className={`flex w-full items-center gap-4 rounded-2xl border p-4 text-left transition ${vehicle === item.id ? 'border-[var(--accent)] bg-[var(--accent-soft)]' : 'border-[var(--line)] bg-[var(--paper)]'}`}><span className="grid h-10 w-12 place-items-center rounded-xl bg-[var(--ink)] text-xl text-white">{item.id === 'xl' ? '▰' : item.id === 'comfort' ? '◒' : '◐'}</span><span className="flex-1"><span className="block text-sm font-extrabold text-[var(--ink)]">{item.label}</span><span className="mt-0.5 block text-xs text-[var(--muted)]">{item.description}</span></span><span className="text-sm font-bold text-[var(--ink)]">${(1180 * item.multiplier / 100).toFixed(2)}</span></button>)}</div></section>}
       {mode === 'scheduled' && <section className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4"><p className="mb-3 text-sm font-extrabold text-[var(--ink)]">When should we pick you up?</p><div className="grid grid-cols-2 gap-3"><input aria-label="Pickup date" type="date" value={date} onChange={(e) => setDate(e.target.value)} className="rounded-xl border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-sm text-[var(--ink)]" /><input aria-label="Pickup time" type="time" value={time} onChange={(e) => setTime(e.target.value)} className="rounded-xl border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-sm text-[var(--ink)]" /></div></section>}
       {mode === 'recurring' && <section className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4"><p className="text-sm font-extrabold text-[var(--ink)]">Build a routine</p><p className="mt-1 text-xs text-[var(--muted)]">We’ll remind you to book when it’s time to leave.</p><div className="mt-4 flex flex-wrap gap-2">{DAYS.map((day) => <button type="button" key={day.id} aria-pressed={days.includes(day.id)} onClick={() => toggleDay(day.id)} className={`rounded-xl border px-3 py-2 text-xs font-bold ${days.includes(day.id) ? 'border-[var(--accent)] bg-[var(--accent)] text-white' : 'border-[var(--line)] text-[var(--ink)]'}`}>{day.label}</button>)}</div><input aria-label="Routine time" type="time" value={time} onChange={(e) => setTime(e.target.value)} className="mt-4 rounded-xl border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-sm text-[var(--ink)]" /></section>}
       {error && <p className="rounded-xl bg-[#fff0ee] px-4 py-3 text-xs font-semibold text-[var(--error)]">{error}</p>}
-      {!live && <button type="submit" disabled={!valid || saving} className="w-full rounded-2xl bg-[var(--accent)] px-5 py-4 text-sm font-extrabold text-white shadow-sm disabled:opacity-40">{saving ? 'Creating your ride…' : action}</button>}
-      {!live && <p className="text-center text-[11px] leading-4 text-[var(--muted)]">Estimate shown before booking. Final fare may vary with route, demand, tolls, and wait time.</p>}
+      {mode !== 'now' && <button type="submit" disabled={!valid || saving} className="w-full rounded-2xl bg-[var(--accent)] px-5 py-4 text-sm font-extrabold text-white shadow-sm disabled:opacity-40">{saving ? 'Creating your ride…' : action}</button>}
+      {mode !== 'now' && <p className="text-center text-[11px] leading-4 text-[var(--muted)]">Estimate shown before booking. Final fare may vary with route, demand, tolls, and wait time.</p>}
     </form>
   </div>
 }
