@@ -362,3 +362,86 @@ describe('trip persistence and transition history', () => {
     expect(call(db, 'get_driver_trip_history', args, 'user-a')).toEqual([])
   })
 })
+
+describe('rider account data', () => {
+  let db: Db
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const profile = { display_name: 'Sam', phone: '555', notify_email: 1, notify_sms: 0, notify_trip_updates: 1 }
+
+  it('upserts one profile per rider and scopes reads to the caller', () => {
+    call(db, 'save_rider_profile', profile, 'user-a', 1_000)
+    call(db, 'save_rider_profile', { ...profile, display_name: 'Sam B', notify_sms: 1 }, 'user-a', 2_000)
+    call(db, 'save_rider_profile', { ...profile, display_name: 'Other' }, 'user-b', 2_000)
+    expect(call(db, 'get_rider_profile', {}, 'user-a')).toEqual([
+      { display_name: 'Sam B', phone: '555', notify_email: 1, notify_sms: 1, notify_trip_updates: 1, updated_at: 2_000 },
+    ])
+    expect(count(db, 'rider_profiles')).toBe(2)
+    expect(call(db, 'get_rider_profile', {}, 'user-c')).toEqual([])
+  })
+
+  it('rejects non-boolean preference flags', () => {
+    expect(() => call(db, 'save_rider_profile', { ...profile, notify_sms: 2 }, 'user-a')).toThrow()
+  })
+
+  it('saved places are per rider; ids cannot be hijacked across riders', () => {
+    const place = { place_id: 'p1', label: 'Home', address: '1 Main St' }
+    call(db, 'save_place', place, 'user-a', 1_000)
+    call(db, 'save_place', { ...place, label: 'Mine' }, 'user-b', 1_000)
+    call(db, 'save_place', { ...place, address: '2 Main St' }, 'user-a', 2_000)
+    expect(call(db, 'list_saved_places', {}, 'user-a')).toMatchObject([{ id: 'p1', label: 'Home', address: '2 Main St' }])
+    call(db, 'delete_place', { place_id: 'p1' }, 'user-b')
+    expect(call(db, 'list_saved_places', {}, 'user-a')).toHaveLength(1)
+    expect(call(db, 'list_saved_places', {}, 'user-b')).toHaveLength(0)
+  })
+
+  it('trip history exposes status, trip status and fare for the caller only', () => {
+    call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
+    call(db, 'save_ride', { ...rideToRecords(legacyRide) }, 'user-a', 1_100)
+    call(db, 'cancel_ride', { request_id: 'now-1' }, 'user-a', 2_000)
+    const rows = call(db, 'list_trip_history', {}, 'user-a') as Record<string, unknown>[]
+    expect(rows.find((r) => r.id === 'now-1')).toMatchObject({ status: 'cancelled', trip_status: 'cancelled', fare_cents: 2450 })
+    expect(rows.find((r) => r.id === 'legacy-1')).toMatchObject({ booking_type: 'recurring', trip_status: null, fare_cents: null })
+    expect(call(db, 'list_trip_history', {}, 'user-b')).toEqual([])
+  })
+
+  it('export returns only the caller\'s rows', () => {
+    call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
+    call(db, 'save_ride', { ...rideToRecords(legacyRide) }, 'user-b', 1_000)
+    expect(call(db, 'export_ride_requests', {}, 'user-a')).toHaveLength(1)
+    expect(call(db, 'export_trips', {}, 'user-a')).toHaveLength(1)
+    expect(call(db, 'export_trip_transitions', {}, 'user-a')).toHaveLength(1)
+    expect(call(db, 'export_trips', {}, 'user-b')).toHaveLength(0)
+    expect(JSON.parse((call(db, 'export_ride_requests', {}, 'user-a') as { client_record: string }[])[0].client_record)).toEqual(onDemandRide)
+  })
+
+  it('deleting a rider erases all their rows and leaves other riders untouched', () => {
+    for (const user of ['user-a', 'user-b']) {
+      call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, user, 1_000)
+      call(db, 'save_rider_profile', profile, user)
+      call(db, 'save_place', { place_id: 'p1', label: 'Home', address: 'x' }, user)
+    }
+    const before = snapshot(db)
+    call(db, 'delete_my_rider_data', {}, 'user-a')
+    for (const table of [...TABLES, 'trip_transitions', 'rider_profiles', 'saved_places']) {
+      const col = table === 'riders' ? 'id' : 'rider_id'
+      expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${col} = 'user-a'`).get(), table).toEqual({ n: 0 })
+      expect((db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${col} = 'user-b'`).get() as { n: number }).n, table).toBeGreaterThan(0)
+    }
+    const after = snapshot(db)
+    for (const t of TABLES) expect(after[t], t).toEqual((before[t] as { rider_id?: string; id: string }[]).filter((r) => (t === 'riders' ? r.id : r.rider_id) === 'user-b'))
+  })
+
+  it('deleting a driver\'s account unlinks them from other riders\' trips but keeps those riders\' data', () => {
+    call(db, 'save_ride', { ...rideToRecords(onDemandRide) }, 'user-a', 1_000)
+    db.prepare('UPDATE drivers SET user_id = ?').run('driver-1')
+    expect(call(db, 'list_driver_trips', {}, 'driver-1')).toHaveLength(1)
+    call(db, 'delete_my_rider_data', {}, 'driver-1')
+    expect(call(db, 'list_driver_trips', {}, 'driver-1')).toEqual([])
+    expect(count(db, 'trips')).toBe(1)
+  })
+})

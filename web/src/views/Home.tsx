@@ -36,6 +36,7 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-2">
             <AuthChip loading={auth.loading} user={auth.user} onSignIn={(provider) => app.auth.signIn(provider)} onSignOut={auth.signOut} />
+            <button onClick={() => setLocation('/account')} className="rounded-full border border-[var(--line)] px-3 py-1 text-xs font-semibold text-[var(--ink)] hover:bg-[var(--accent-soft)]">Account</button>
             <RoleToggle role="rider" />
           </div>
         </div>

@@ -247,6 +247,172 @@
         }
       },
       "requires_auth": true
+    },
+    {
+      "name": "get_rider_profile",
+      "description": "The caller's rider profile and contact preferences (no row until first saved)",
+      "operation": "query",
+      "sql": "SELECT display_name, phone, notify_email, notify_sms, notify_trip_updates, updated_at FROM rider_profiles WHERE rider_id = :__user_id",
+      "requires_auth": true
+    },
+    {
+      "name": "save_rider_profile",
+      "description": "Create or update the caller's rider profile and contact preferences",
+      "operation": "execute",
+      "sql": "INSERT INTO rider_profiles (rider_id, display_name, phone, notify_email, notify_sms, notify_trip_updates, created_at, updated_at) VALUES (:__user_id, :display_name, :phone, :notify_email, :notify_sms, :notify_trip_updates, :__now, :__now) ON CONFLICT (rider_id) DO UPDATE SET display_name = excluded.display_name, phone = excluded.phone, notify_email = excluded.notify_email, notify_sms = excluded.notify_sms, notify_trip_updates = excluded.notify_trip_updates, updated_at = excluded.updated_at",
+      "params": {
+        "display_name": {
+          "type": "string",
+          "optional": true
+        },
+        "phone": {
+          "type": "string",
+          "optional": true
+        },
+        "notify_email": {
+          "type": "integer"
+        },
+        "notify_sms": {
+          "type": "integer"
+        },
+        "notify_trip_updates": {
+          "type": "integer"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "list_saved_places",
+      "description": "List the caller's saved places (Home, Work, ...)",
+      "operation": "query",
+      "sql": "SELECT id, label, address, lat, lng, created_at FROM saved_places WHERE rider_id = :__user_id ORDER BY created_at LIMIT :limit",
+      "params": {
+        "limit": {
+          "type": "integer",
+          "default": 100,
+          "max": 200,
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "save_place",
+      "description": "Create or update one of the caller's saved places",
+      "operation": "execute",
+      "sql": "INSERT INTO saved_places (rider_id, id, label, address, lat, lng, created_at, updated_at) VALUES (:__user_id, :place_id, :label, :address, :lat, :lng, :__now, :__now) ON CONFLICT (rider_id, id) DO UPDATE SET label = excluded.label, address = excluded.address, lat = excluded.lat, lng = excluded.lng, updated_at = excluded.updated_at",
+      "params": {
+        "place_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "lat": {
+          "type": "number",
+          "optional": true
+        },
+        "lng": {
+          "type": "number",
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "delete_place",
+      "description": "Delete one of the caller's saved places",
+      "operation": "execute",
+      "sql": "DELETE FROM saved_places WHERE rider_id = :__user_id AND id = :place_id",
+      "params": {
+        "place_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "list_trip_history",
+      "description": "The caller's ride requests with trip status and fare, newest activity first. Client groups them into active, scheduled, completed and cancelled.",
+      "operation": "query",
+      "sql": "SELECT r.id, r.booking_type, r.status, r.pickup_label, r.dropoff_label, r.recurring_days, r.pickup_time, r.scheduled_for, r.vehicle_class, r.created_at, r.updated_at, t.status AS trip_status, q.fare_cents FROM ride_requests r LEFT JOIN trips t ON t.rider_id = r.rider_id AND t.request_id = r.id LEFT JOIN quotes q ON q.rider_id = r.rider_id AND q.request_id = r.id WHERE r.rider_id = :__user_id ORDER BY r.updated_at DESC LIMIT :limit",
+      "params": {
+        "limit": {
+          "type": "integer",
+          "default": 50,
+          "max": 200,
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "export_ride_requests",
+      "description": "Data export: every ride request the caller owns, including the stored client record",
+      "operation": "query",
+      "sql": "SELECT * FROM ride_requests WHERE rider_id = :__user_id ORDER BY created_at LIMIT :limit",
+      "params": {
+        "limit": {
+          "type": "integer",
+          "default": 1000,
+          "max": 5000,
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "export_trips",
+      "description": "Data export: every trip the caller owns",
+      "operation": "query",
+      "sql": "SELECT * FROM trips WHERE rider_id = :__user_id ORDER BY created_at LIMIT :limit",
+      "params": {
+        "limit": {
+          "type": "integer",
+          "default": 1000,
+          "max": 5000,
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "export_trip_transitions",
+      "description": "Data export: the full trip transition history for the caller's trips",
+      "operation": "query",
+      "sql": "SELECT * FROM trip_transitions WHERE rider_id = :__user_id ORDER BY at LIMIT :limit",
+      "params": {
+        "limit": {
+          "type": "integer",
+          "default": 5000,
+          "max": 20000,
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "delete_my_rider_data",
+      "description": "Erase everything the caller owns as a rider (profile, saved places, requests, quotes, assignments, trips, history, drivers and vehicles they recorded) and unlink the caller's driver account. Irreversible.",
+      "operation": "batch",
+      "statements": [
+        "DELETE FROM trip_transitions WHERE rider_id = :__user_id",
+        "DELETE FROM trip_events WHERE rider_id = :__user_id",
+        "DELETE FROM trips WHERE rider_id = :__user_id",
+        "DELETE FROM assignments WHERE rider_id = :__user_id",
+        "DELETE FROM quotes WHERE rider_id = :__user_id",
+        "DELETE FROM vehicles WHERE rider_id = :__user_id",
+        "DELETE FROM drivers WHERE rider_id = :__user_id",
+        "DELETE FROM ride_requests WHERE rider_id = :__user_id",
+        "DELETE FROM saved_places WHERE rider_id = :__user_id",
+        "DELETE FROM rider_profiles WHERE rider_id = :__user_id",
+        "DELETE FROM riders WHERE id = :__user_id",
+        "UPDATE drivers SET user_id = NULL WHERE user_id = :__user_id"
+      ],
+      "requires_auth": true
     }
   ]
 }

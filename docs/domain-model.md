@@ -85,6 +85,34 @@ Read paths, all scoped to the caller: `list_my_trips`, `get_my_trip_history`
 **Not built yet:** a flow that sets `drivers.user_id` (a driver claiming their
 account). Until then the driver actions return nothing and change nothing.
 
+## Rider account (issue #3)
+
+Route `/account` (linked from Home). Migration `0003_rider_profile` adds
+`rider_profiles` (name, phone, email/SMS/trip-update preferences) and
+`saved_places`; client code is `web/src/lib/riderAccount.ts`.
+
+- **Trip history:** `list_trip_history` returns the rider's requests with trip
+  status and fare. The client groups them: *active* (on-demand, or a trip
+  `en_route`/`arrived`), *scheduled* (scheduled/recurring, not started),
+  *completed*, *cancelled*. Cancelled trips exist only in the DB (they are
+  deleted from the local cache), so signed-in history reads from the DB.
+- **Profile, contact preferences, saved places:** `get_rider_profile`,
+  `save_rider_profile`, `list_saved_places`, `save_place`, `delete_place`. Saved
+  places are not yet offered as shortcuts in the request flow.
+- **Export:** "Export my data" downloads one JSON document built from
+  `get_rider_profile`, `list_saved_places`, `export_ride_requests` (includes the
+  stored client record), `export_trips`, `export_trip_transitions`.
+- **Deletion:** typing `DELETE` runs `delete_my_rider_data` (every row the rider
+  owns, and unlinks `drivers.user_id` if they were a driver on other riders'
+  trips; those riders' data stays), then deletes the synced KV copy and local
+  rides, then the platform account via the SDK's `deleteAccount`. If the DB step
+  fails nothing else is touched. Erasure includes the trip audit history.
+- **Anonymous riders:** can request rides without signing in. Those rides live
+  only in this browser's localStorage and are never written to the DB; the
+  Account page says so. Signing in is the upgrade path: `syncRides()` uploads
+  the on-device rides to the account (KV and DB) with no re-entry. Profile,
+  saved places, export and deletion require sign-in.
+
 ## Migrating legacy rides
 
 Existing rides live in localStorage (`loopride.rides.v2`, which already absorbs

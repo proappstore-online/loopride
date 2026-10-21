@@ -6,6 +6,7 @@ import NewRide from './views/NewRide'
 import Trip from './views/Trip'
 import DriverHome from './views/DriverHome'
 import DriverTrip from './views/DriverTrip'
+import Account from './views/Account'
 import { getRole, setRole } from './lib/mode'
 import { clearShareHash, decodeShareHash } from './lib/share'
 import { getRide, saveRide } from './storage'
@@ -66,6 +67,7 @@ export default function App() {
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/new" component={NewRide} />
+      <Route path="/account" component={Account} />
       <Route path="/trip/:rideId">
         {(params) => <Trip rideId={params.rideId} />}
       </Route>
