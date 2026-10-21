@@ -39,8 +39,17 @@ function migrate(db: Db, applied: Set<string>) {
   }
 }
 
+// Location actions need the driver's consent (issue #13). These suites are about dispatch, tracking and
+// lifecycle rules rather than consent, so the caller is treated as having agreed; privacy.schema.test.ts
+// covers consent itself without this shortcut.
+const NEEDS_CONSENT = new Set(['update_driver_location', 'publish_driver_location', 'set_driver_availability'])
+
 function call(db: Db, name: string, params: Record<string, unknown>, userId: string, now = 1_000) {
   const t = tool(name)
+  if (NEEDS_CONSENT.has(name)) {
+    for (const purpose of ['dispatch_availability', 'trip_tracking'])
+      db.prepare("INSERT OR IGNORE INTO location_consents (user_id, purpose, granted, notice_version, granted_at, updated_at) VALUES (?, ?, 1, 'test', 1, 1)").run(userId, purpose)
+  }
   const bound: Record<string, unknown> = { __user_id: userId, __now: now, __uuid: crypto.randomUUID() }
   for (const [key, spec] of Object.entries(t.params ?? {})) {
     const value = params[key]

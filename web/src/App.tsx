@@ -11,12 +11,21 @@ import DriverOnboarding from './views/DriverOnboarding'
 import Ops from './views/Ops'
 import { getRole } from './lib/mode'
 import { useRideSync } from './lib/rideSync'
+import { runRetention } from './lib/privacy'
+import { useAuth } from './lib/useAuth'
 
 export default function App() {
   const [location, setLocation] = useLocation()
   const redirected = useRef(false)
 
   useRideSync()
+
+  // Backstop for data expiry: other actions already purge as they run, this covers quiet periods.
+  const auth = useAuth()
+  const signedIn = Boolean(auth.user)
+  useEffect(() => {
+    if (signedIn) void runRetention()
+  }, [signedIn])
 
   // A returning driver lands on the driver home instead of the rider home.
   useEffect(() => {

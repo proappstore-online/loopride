@@ -4,6 +4,8 @@ import AuthChip from '../components/AuthChip'
 import { app } from '../lib/app'
 import { useAuth } from '../lib/useAuth'
 import { showToast } from '../lib/toast'
+import LocationConsent from '../components/LocationConsent'
+import { useLocationConsent } from '../lib/useLocationConsent'
 import { SERVICE_RADIUS_OPTIONS_KM, currentPosition, loadLocation, publishLocation } from '../lib/dispatch'
 import {
   EMPTY_APPLICATION,
@@ -203,6 +205,7 @@ function Availability({ vehicles }: { vehicles: DriverVehicle[] }) {
   const approved = vehicles.filter((v) => v.status === 'approved')
   const [state, setState] = useState<{ available: boolean; vehicleId: string | null } | null>(null)
   const [radiusKm, setRadiusKm] = useState<number>(5)
+  const consent = useLocationConsent('dispatch_availability')
 
   useEffect(() => {
     loadAvailability().then(setState, () => undefined)
@@ -228,8 +231,12 @@ function Availability({ vehicles }: { vehicles: DriverVehicle[] }) {
     return () => clearInterval(timer)
   }, [online, publish])
 
+  const withdraw = async () => {
+    if (await consent.withdraw()) setState(await loadAvailability().catch(() => ({ available: false, vehicleId: null })))
+  }
+
   const toggle = async () => {
-    if (!state) return
+    if (!state || consent.state !== 'granted') return
     const vehicleId = state.vehicleId ?? approved[0]?.id ?? null
     try {
       if (!state.available && !(await publish())) {
@@ -252,12 +259,13 @@ function Availability({ vehicles }: { vehicles: DriverVehicle[] }) {
         <p className="text-xs text-[var(--muted)]">You need an approved vehicle before you can go available.</p>
       ) : (
         <div className="space-y-3">
+          <LocationConsent purpose="dispatch_availability" state={consent.state} failed={consent.failed} onGrant={consent.grant} onWithdraw={withdraw} />
           <label className="block text-xs font-bold text-[var(--ink)]">Service area
             <select className={`${input} mt-1`} value={radiusKm} onChange={(e) => setRadiusKm(Number(e.target.value))}>
               {SERVICE_RADIUS_OPTIONS_KM.map((km) => <option key={km} value={km}>Within {km} km of my location</option>)}
             </select>
           </label>
-          <button onClick={toggle} className="rounded-2xl bg-[var(--ink)] px-5 py-2 text-sm font-semibold text-white">
+          <button onClick={toggle} disabled={consent.state !== 'granted' && !state?.available} className="rounded-2xl bg-[var(--ink)] px-5 py-2 text-sm font-semibold text-white disabled:opacity-50">
             {state?.available ? 'Go offline' : 'Go available'}
           </button>
         </div>

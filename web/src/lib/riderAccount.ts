@@ -1,5 +1,5 @@
 import { app } from './app'
-import { KV_KEYS } from './constants'
+import { KV_KEYS, STORAGE_KEYS } from './constants'
 import { clearLocalRides, listRides } from '../storage'
 import type { RecurringRide } from '../types'
 
@@ -160,14 +160,47 @@ export async function deletePlace(id: string): Promise<void> {
   await app.actions.call('delete_place', { place_id: id })
 }
 
-/** Everything the DB holds about the rider, as one JSON-serialisable document. */
+interface SectionRow {
+  section: string
+  records: string
+}
+
+/** The `export_*_records` actions return one row per section with its records as a JSON array. */
+async function exportSections(action: string): Promise<Record<string, unknown[]>> {
+  const rows = await app.actions.call<SectionRow[]>(action, {})
+  const out: Record<string, unknown[]> = {}
+  for (const row of rows) {
+    try {
+      const parsed: unknown = JSON.parse(row.records)
+      out[row.section] = Array.isArray(parsed) ? parsed : []
+    } catch {
+      out[row.section] = []
+    }
+  }
+  return out
+}
+
+/**
+ * Everything the app holds about this person, as one JSON-serialisable document: as a rider, as a
+ * driver, and across both. What is deliberately left out (other people's data, staff notes, staff
+ * audit logs) is listed in docs/privacy.md.
+ */
 export async function exportAccountData(): Promise<Record<string, unknown>> {
-  const [profile, places, rideRequests, trips, tripTransitions] = await Promise.all([
+  const [profile, places, rideRequests, trips, tripTransitions, rider, driver, account, application, vehicles, availability, reviewLog, driverTrips, earnings] = await Promise.all([
     app.actions.call('get_rider_profile', {}),
     app.actions.call('list_saved_places', {}),
     app.actions.call('export_ride_requests', {}),
     app.actions.call('export_trips', {}),
     app.actions.call('export_trip_transitions', {}),
+    exportSections('export_rider_records'),
+    exportSections('export_driver_records'),
+    exportSections('export_account_records'),
+    app.actions.call('get_my_driver_application', {}),
+    app.actions.call('list_my_driver_vehicles', {}),
+    app.actions.call('get_my_driver_availability', {}),
+    app.actions.call('list_my_driver_review_log', {}),
+    app.actions.call('list_driver_trips', { limit: 200 }),
+    app.actions.call('list_my_earnings', { limit: 200 }),
   ])
   return {
     exportedAt: new Date().toISOString(),
@@ -177,6 +210,10 @@ export async function exportAccountData(): Promise<Record<string, unknown>> {
     rideRequests,
     trips,
     tripTransitions,
+    asRider: rider,
+    asDriver: { application, vehicles, availability, reviewLog, trips: driverTrips, earnings, ...driver },
+    account,
+    onThisDevice: { rides: listRides(), role: localStorage.getItem(STORAGE_KEYS.role) },
   }
 }
 
@@ -187,4 +224,7 @@ export async function eraseRiderData(): Promise<void> {
   await app.actions.call('delete_my_driver_data', {})
   await app.kv.delete(KV_KEYS.rides)
   clearLocalRides()
+  // The remaining device-side keys: which mode this browser was in, and when it last asked for expiry.
+  localStorage.removeItem(STORAGE_KEYS.role)
+  localStorage.removeItem(STORAGE_KEYS.retention)
 }

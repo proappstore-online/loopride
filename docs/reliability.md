@@ -72,6 +72,8 @@ No payment is collected (ADR 0001), so there is no external payment call. Money 
 | `ops_set_service_flag` | harmless | a repeat of the current state is ignored |
 | `report_client_event` | best effort | deduplicated in the app (30 s) and capped at 20 per minute per person by the server; failures are swallowed |
 | `report_client_metrics` | additive | counters for the same minute add up; a lost report loses that minute |
+| `set_location_consent` | harmless | an upsert of the same value; withdrawing re-runs its erasures, which find nothing |
+| `purge_expired_data` | harmless | deletes only rows already past their retention period |
 
 ## Other external calls
 

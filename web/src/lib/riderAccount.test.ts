@@ -88,8 +88,16 @@ describe('profile', () => {
 })
 
 describe('export and deletion', () => {
-  it('export bundles every rider-owned dataset', async () => {
-    actions.call.mockImplementation(async (name: string) => [name])
+  it('export bundles every dataset: rider, driver and account sections, plus this device', async () => {
+    localStorage.setItem('loopride.role.v1', 'driver')
+    saveRide({ id: 'a', pickup: 'A', pickupCoord: null, dropoff: 'B', dropoffCoord: null, days: [], time: '08:00', driverName: '', paused: false, createdAt: 1 })
+    const sections = (rows: Record<string, unknown[]>) => Object.entries(rows).map(([section, records]) => ({ section, records: JSON.stringify(records) }))
+    actions.call.mockImplementation(async (name: string) => {
+      if (name === 'export_rider_records') return sections({ quotes: [{ id: 'q' }], fare_statements: [{ receipt_no: 'R1' }] })
+      if (name === 'export_driver_records') return sections({ locations: [{ source: 'dispatch' }], offers: [] })
+      if (name === 'export_account_records') return sections({ notifications: [{ id: 'n1' }], location_consents: [{ purpose: 'trip_tracking' }] })
+      return [name]
+    })
     const data = await exportAccountData()
     expect(data).toMatchObject({
       userId: 'u1',
@@ -98,7 +106,32 @@ describe('export and deletion', () => {
       rideRequests: ['export_ride_requests'],
       trips: ['export_trips'],
       tripTransitions: ['export_trip_transitions'],
+      asRider: { quotes: [{ id: 'q' }], fare_statements: [{ receipt_no: 'R1' }] },
+      asDriver: {
+        application: ['get_my_driver_application'],
+        vehicles: ['list_my_driver_vehicles'],
+        availability: ['get_my_driver_availability'],
+        reviewLog: ['list_my_driver_review_log'],
+        trips: ['list_driver_trips'],
+        earnings: ['list_my_earnings'],
+        locations: [{ source: 'dispatch' }],
+        offers: [],
+      },
+      account: { notifications: [{ id: 'n1' }], location_consents: [{ purpose: 'trip_tracking' }] },
+      onThisDevice: { role: 'driver', rides: [expect.objectContaining({ id: 'a' })] },
     })
+    expect(typeof data.exportedAt).toBe('string')
+  })
+
+  it('export tolerates a section that is not valid JSON instead of failing the whole download', async () => {
+    actions.call.mockImplementation(async (name: string) => (name === 'export_rider_records' ? [{ section: 'quotes', records: '{oops' }, { section: 'assignments', records: '{"not":"array"}' }] : []))
+    const data = (await exportAccountData()) as { asRider: Record<string, unknown> }
+    expect(data.asRider).toEqual({ quotes: [], assignments: [] })
+  })
+
+  it('export fails loudly when the server does, so a partial file is never presented as complete', async () => {
+    actions.call.mockImplementation(async (name: string) => { if (name === 'export_rider_records') throw new Error('boom'); return [] })
+    await expect(exportAccountData()).rejects.toThrow('boom')
   })
 
   it('erase deletes DB rows, the KV copy and local rides', async () => {
@@ -109,6 +142,15 @@ describe('export and deletion', () => {
     expect(actions.call).toHaveBeenCalledWith('delete_my_driver_data', {}) // a batch is limited to 25 statements, so there are two
     expect(kv.delete).toHaveBeenCalledWith('rides.v1')
     expect(listRides()).toEqual([])
+  })
+
+  it('erase also clears the other device-side keys', async () => {
+    localStorage.setItem('loopride.role.v1', 'driver')
+    localStorage.setItem('loopride.retention.v1', '123')
+    actions.call.mockResolvedValue(undefined)
+    await eraseRiderData()
+    expect(localStorage.getItem('loopride.role.v1')).toBeNull()
+    expect(localStorage.getItem('loopride.retention.v1')).toBeNull()
   })
 
   it('does not wipe local data when the DB deletion fails', async () => {

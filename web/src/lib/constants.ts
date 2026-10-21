@@ -7,6 +7,7 @@ export const STORAGE_KEYS = {
   rides: 'loopride.rides.v2',
   role: 'loopride.role.v1',
   ridesOwner: 'loopride.rides.owner.v1',
+  retention: 'loopride.retention.v1',
 } as const
 
 /** Keys inside FAS KV (per-user, server-side). */

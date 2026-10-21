@@ -47,6 +47,10 @@
     {
       "name": "0012_observability",
       "sql": "CREATE TABLE IF NOT EXISTS client_events (user_id TEXT NOT NULL, id TEXT NOT NULL, at INTEGER NOT NULL, domain TEXT NOT NULL CHECK (domain IN ('request', 'dispatch', 'tracking', 'notification', 'payment', 'maps', 'transition')), code TEXT NOT NULL, action TEXT, status INTEGER, latency_ms INTEGER, trip_id TEXT, request_id TEXT, severity TEXT NOT NULL CHECK (severity IN ('warn', 'error')), detail TEXT, PRIMARY KEY (user_id, id)); CREATE INDEX IF NOT EXISTS idx_client_events_at ON client_events (at, domain, severity); CREATE INDEX IF NOT EXISTS idx_client_events_trip ON client_events (trip_id, at); CREATE TABLE IF NOT EXISTS client_metrics (user_id TEXT NOT NULL, minute INTEGER NOT NULL, domain TEXT NOT NULL CHECK (domain IN ('request', 'dispatch', 'tracking', 'notification', 'payment', 'maps', 'transition')), calls INTEGER NOT NULL, errors INTEGER NOT NULL, slow INTEGER NOT NULL, latency_sum_ms INTEGER NOT NULL, PRIMARY KEY (user_id, minute, domain)); CREATE INDEX IF NOT EXISTS idx_client_metrics_minute ON client_metrics (minute, domain); CREATE TABLE IF NOT EXISTS service_flag_log (id TEXT PRIMARY KEY, name TEXT NOT NULL CHECK (name IN ('dispatch')), paused INTEGER NOT NULL CHECK (paused IN (0, 1)), reason_code TEXT NOT NULL, note TEXT NOT NULL, actor_id TEXT NOT NULL, at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_service_flag_log_name ON service_flag_log (name, at)"
+    },
+    {
+      "name": "0013_privacy",
+      "sql": "CREATE TABLE IF NOT EXISTS location_consents (user_id TEXT NOT NULL, purpose TEXT NOT NULL CHECK (purpose IN ('dispatch_availability', 'trip_tracking')), granted INTEGER NOT NULL CHECK (granted IN (0, 1)), notice_version TEXT NOT NULL, granted_at INTEGER, withdrawn_at INTEGER, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, purpose))"
     }
   ]
 }

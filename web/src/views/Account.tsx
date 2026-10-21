@@ -26,6 +26,7 @@ import {
 import { loadReceipts, type Receipt } from '../lib/receipts'
 import ReceiptCard from '../components/ReceiptCard'
 import NotificationSettings from '../components/NotificationSettings'
+import PrivacySettings from '../components/PrivacySettings'
 
 const card = 'rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4'
 const input = 'w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm text-[var(--ink)]'
@@ -59,6 +60,7 @@ export default function Account() {
           <NotificationSettings />
           <ProfileForm />
           <SavedPlaces />
+          <PrivacySettings />
           <DataControls deleteAccount={auth.deleteAccount} />
         </>
       )}
@@ -246,7 +248,9 @@ function DataControls({ deleteAccount }: { deleteAccount: () => Promise<void> })
       <button onClick={download} className="rounded-2xl border border-[var(--line)] px-4 py-2 text-sm font-bold text-[var(--ink)]">Export my data (JSON)</button>
       <p className="mt-5 text-xs leading-5 text-[var(--muted)]">
         Deleting your account permanently erases your profile, saved places, ride requests, trips and trip history,
-        then removes your sign-in. This cannot be undone.
+        receipts, notifications, driver application and vehicles, and any stored location, then removes your sign-in.
+        A few staff records (the log of who looked at personal data, escalations and driver review decisions) are
+        kept for audit. This cannot be undone.
       </p>
       <label className="mt-2 block text-xs font-bold text-[var(--ink)]">Type DELETE to confirm
         <input className={`${input} mt-1`} value={confirm} onChange={(e) => setConfirm(e.target.value)} />

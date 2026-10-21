@@ -21,6 +21,8 @@ import {
 } from '../lib/tripLifecycle'
 import { loadEarnings, money, type Earning } from '../lib/receipts'
 import { reportError } from '../lib/telemetry'
+import LocationConsent from '../components/LocationConsent'
+import { useLocationConsent } from '../lib/useLocationConsent'
 
 const TripMap = lazy(() => import('./TripMap'))
 
@@ -87,11 +89,14 @@ export default function DriverTrip({ riderId, rideId }: Props) {
   }, [finished, tripId])
   const driving = phase === 'en_route' || phase === 'arrived' || phase === 'in_progress'
   useWakeLock(driving)
+  const consent = useLocationConsent('trip_tracking')
+  const sharing = driving && consent.state === 'granted'
 
   // Real GPS only, sent as authenticated, throttled updates, and only while the trip is
-  // in a phase where the server will accept them. Sharing stops the moment the trip ends.
+  // in a phase where the server will accept them and the driver has agreed to share. Sharing
+  // stops the moment the trip ends or the agreement is withdrawn.
   useEffect(() => {
-    if (!driving) return
+    if (!sharing) return
     if (!('geolocation' in navigator)) {
       setGeoError('Location is not available on this device')
       return
@@ -118,7 +123,7 @@ export default function DriverTrip({ riderId, rideId }: Props) {
       publisher.stop()
       setHealth('waiting')
     }
-  }, [driving, riderId, tripId, rideId])
+  }, [sharing, riderId, tripId, rideId])
 
   /**
    * Run one trip action and confirm the server did it. The screen only offers legal steps, so a
@@ -170,7 +175,13 @@ export default function DriverTrip({ riderId, rideId }: Props) {
       <section className="rounded-3xl border border-[var(--line)] p-6">
         <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Trip</p>
         <p className="mt-1 text-sm font-semibold text-[var(--ink)]">{trip.pickup} → {trip.dropoff}</p>
-        {driving && (
+        {driving && consent.state === 'not_granted' && (
+          <div className="mt-3">
+            <LocationConsent purpose="trip_tracking" state={consent.state} failed={consent.failed} onGrant={consent.grant} onWithdraw={consent.withdraw} />
+            <p role="status" className="mt-2 text-xs font-semibold text-[var(--error)]">Location sharing is off. The rider can't see you.</p>
+          </div>
+        )}
+        {sharing && (
           <p role="status" className={`mt-2 text-xs ${health === 'failing' || geoError ? 'font-semibold text-[var(--error)]' : 'text-[var(--muted)]'}`}>
             {geoError
               ? `Location: ${geoError}. The rider can't see you.`
@@ -180,6 +191,9 @@ export default function DriverTrip({ riderId, rideId }: Props) {
                   ? 'Sharing your live location with the rider until the trip ends'
                   : 'Waiting for a location fix…'}
           </p>
+        )}
+        {sharing && (
+          <button onClick={consent.withdraw} className="mt-2 rounded-xl border border-[var(--line)] px-3 py-1 text-xs font-bold text-[var(--ink)]">Stop sharing</button>
         )}
       </section>
 

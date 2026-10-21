@@ -543,6 +543,30 @@ nothing pages anyone, because the app has no server-side sender.
 While adding this, geocoding and routing were found to be calling the Maps API with a plain `fetch`
 that carries no session, which the API rejects with 401; they now use the SDK (`app.maps`).
 
+## Privacy, consent, retention and deletion (issue #13)
+
+Migration `0013_privacy`: `location_consents` (per person and purpose: on/off, notice version, when given
+or withdrawn). The full treatment is in [`privacy.md`](privacy.md) (inventory of every data class, consent
+and purpose limitation, retention schedule, export and deletion, and the legal questions left open) and
+[`security-review.md`](security-review.md) (authorization, secrets, logs, abuse limits).
+
+New actions: `get_my_location_consents`, `set_location_consent`, `purge_expired_data`, and three
+section-based exports (`export_rider_records`, `export_driver_records`, `export_account_records`). The
+platform caps a manifest at 120 actions, so the exports return one row per section with a JSON array each.
+
+- `update_driver_location`, `set_driver_availability` (going available) and `publish_driver_location` now
+  refuse without the matching consent. Withdrawing deletes what was collected under that purpose.
+- Going offline deletes the stored dispatch position (previously it stayed until overwritten).
+- `purge_expired_data` expires trip and dispatch positions (24 hours), evidence and notifications
+  (30 days) and diagnostics (14 days) for everyone; the app calls it every six hours.
+- Account export now covers every data class; erasure is unchanged except that it also clears the role and
+  expiry keys on the device and `delete_my_driver_data` removes consent records.
+- `list_dispatchable_drivers` shows an initial instead of the driver's full name; a rider can keep 50 saved
+  places and a driver 10 vehicles.
+
+`web/src/lib/privacyInventory.ts` is the inventory as data; `privacy.schema.test.ts` fails if a table, an
+export, an erasure statement or a purge window disagrees with it.
+
 ## Migrating legacy rides
 
 Existing rides live in localStorage (`loopride.rides.v2`, which already absorbs

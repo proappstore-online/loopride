@@ -328,9 +328,9 @@
     },
     {
       "name": "save_place",
-      "description": "Create or update one of the caller's saved places",
+      "description": "Create or update one of the caller's saved places. At most 50 saved places per rider; further new places are ignored.",
       "operation": "execute",
-      "sql": "INSERT INTO saved_places (rider_id, id, label, address, lat, lng, created_at, updated_at) VALUES (:__user_id, :place_id, :label, :address, :lat, :lng, :__now, :__now) ON CONFLICT (rider_id, id) DO UPDATE SET label = excluded.label, address = excluded.address, lat = excluded.lat, lng = excluded.lng, updated_at = excluded.updated_at",
+      "sql": "INSERT INTO saved_places (rider_id, id, label, address, lat, lng, created_at, updated_at) SELECT :__user_id, :place_id, :label, :address, :lat, :lng, :__now, :__now WHERE (SELECT COUNT(*) FROM saved_places s WHERE s.rider_id = :__user_id) < 50 OR EXISTS (SELECT 1 FROM saved_places s WHERE s.rider_id = :__user_id AND s.id = :place_id) ON CONFLICT (rider_id, id) DO UPDATE SET label = excluded.label, address = excluded.address, lat = excluded.lat, lng = excluded.lng, updated_at = excluded.updated_at",
       "params": {
         "place_id": {
           "type": "string"
@@ -504,10 +504,10 @@
     },
     {
       "name": "save_driver_vehicle",
-      "description": "Add or edit one of the caller's vehicles. Changing any detail of an existing vehicle sends it back to pending review and takes the driver off dispatch if it was the active vehicle.",
+      "description": "Add or edit one of the caller's vehicles. Changing any detail of an existing vehicle sends it back to pending review and takes the driver off dispatch if it was the active vehicle. At most 10 vehicles per driver; further new vehicles are ignored.",
       "operation": "batch",
       "statements": [
-        "INSERT INTO driver_vehicles (user_id, id, plate, make, model, year, colour, seats, vehicle_class, status, created_at, updated_at) VALUES (:__user_id, :vehicle_id, :plate, :make, :model, :year, :colour, :seats, :vehicle_class, 'pending', :__now, :__now) ON CONFLICT (user_id, id) DO UPDATE SET status = CASE WHEN driver_vehicles.plate IS excluded.plate AND driver_vehicles.make IS excluded.make AND driver_vehicles.model IS excluded.model AND driver_vehicles.year IS excluded.year AND driver_vehicles.colour IS excluded.colour AND driver_vehicles.seats IS excluded.seats AND driver_vehicles.vehicle_class IS excluded.vehicle_class THEN driver_vehicles.status ELSE 'pending' END, plate = excluded.plate, make = excluded.make, model = excluded.model, year = excluded.year, colour = excluded.colour, seats = excluded.seats, vehicle_class = excluded.vehicle_class, updated_at = excluded.updated_at",
+        "INSERT INTO driver_vehicles (user_id, id, plate, make, model, year, colour, seats, vehicle_class, status, created_at, updated_at) SELECT :__user_id, :vehicle_id, :plate, :make, :model, :year, :colour, :seats, :vehicle_class, 'pending', :__now, :__now WHERE (SELECT COUNT(*) FROM driver_vehicles x WHERE x.user_id = :__user_id) < 10 OR EXISTS (SELECT 1 FROM driver_vehicles x WHERE x.user_id = :__user_id AND x.id = :vehicle_id) ON CONFLICT (user_id, id) DO UPDATE SET status = CASE WHEN driver_vehicles.plate IS excluded.plate AND driver_vehicles.make IS excluded.make AND driver_vehicles.model IS excluded.model AND driver_vehicles.year IS excluded.year AND driver_vehicles.colour IS excluded.colour AND driver_vehicles.seats IS excluded.seats AND driver_vehicles.vehicle_class IS excluded.vehicle_class THEN driver_vehicles.status ELSE 'pending' END, plate = excluded.plate, make = excluded.make, model = excluded.model, year = excluded.year, colour = excluded.colour, seats = excluded.seats, vehicle_class = excluded.vehicle_class, updated_at = excluded.updated_at",
         "UPDATE driver_availability SET available = 0, updated_at = :__now WHERE user_id = :__user_id AND vehicle_id = :vehicle_id AND NOT EXISTS (SELECT 1 FROM driver_vehicles v WHERE v.user_id = :__user_id AND v.id = :vehicle_id AND v.status = 'approved')"
       ],
       "params": {
@@ -583,7 +583,7 @@
     },
     {
       "name": "set_driver_availability",
-      "description": "Go on or off dispatch. Going available only works for an approved (not suspended) driver with an unexpired licence and an approved vehicle; otherwise nothing changes. Going unavailable always works. Going offline also withdraws any open offer to the driver.",
+      "description": "Go on or off dispatch. Going available only works for an approved (not suspended) driver with an unexpired licence and an approved vehicle; otherwise nothing changes. Going unavailable always works. Going offline also withdraws any open offer to the driver. Going available also needs the dispatch_availability location consent. Going offline erases the stored dispatch position.",
       "operation": "batch",
       "params": {
         "available": {
@@ -596,8 +596,9 @@
       },
       "requires_auth": true,
       "statements": [
-        "INSERT INTO driver_availability (user_id, available, vehicle_id, updated_at) SELECT :__user_id, :available, :vehicle_id, :__now WHERE :available = 0 OR EXISTS (SELECT 1 FROM driver_applications a JOIN driver_vehicles v ON v.user_id = a.user_id WHERE a.user_id = :__user_id AND a.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND v.id = :vehicle_id AND v.status = 'approved') ON CONFLICT (user_id) DO UPDATE SET available = excluded.available, vehicle_id = COALESCE(excluded.vehicle_id, driver_availability.vehicle_id), updated_at = excluded.updated_at",
-        "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE driver_id = :__user_id AND status = 'offered' AND :available = 0"
+        "INSERT INTO driver_availability (user_id, available, vehicle_id, updated_at) SELECT :__user_id, :available, :vehicle_id, :__now WHERE :available = 0 OR (EXISTS (SELECT 1 FROM driver_applications a JOIN driver_vehicles v ON v.user_id = a.user_id WHERE a.user_id = :__user_id AND a.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND v.id = :vehicle_id AND v.status = 'approved') AND EXISTS (SELECT 1 FROM location_consents c WHERE c.user_id = :__user_id AND c.purpose = 'dispatch_availability' AND c.granted = 1)) ON CONFLICT (user_id) DO UPDATE SET available = excluded.available, vehicle_id = COALESCE(excluded.vehicle_id, driver_availability.vehicle_id), updated_at = excluded.updated_at",
+        "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE driver_id = :__user_id AND status = 'offered' AND :available = 0",
+        "DELETE FROM driver_locations WHERE user_id = :__user_id AND :available = 0"
       ]
     },
     {
@@ -743,9 +744,9 @@
     },
     {
       "name": "list_dispatchable_drivers",
-      "description": "Ops/dispatch: drivers who are available right now AND still approved, with an approved vehicle and an unexpired licence. Suspension, rejection or licence expiry removes a driver here even if their availability flag is stale.",
+      "description": "Ops/dispatch: drivers who are available right now AND still approved, with an approved vehicle and an unexpired licence. Suspension, rejection or licence expiry removes a driver here even if their availability flag is stale. The driver's name is shown as an initial only; full details need the ops_pii role and a logged reason.",
       "operation": "query",
-      "sql": "SELECT d.user_id, a.full_name, v.id AS vehicle_id, v.plate, v.vehicle_class, v.seats FROM driver_availability d JOIN driver_applications a ON a.user_id = d.user_id JOIN driver_vehicles v ON v.user_id = d.user_id AND v.id = d.vehicle_id WHERE d.available = 1 AND a.status = 'approved' AND v.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND :__user_id IS NOT NULL ORDER BY d.updated_at LIMIT :limit",
+      "sql": "SELECT d.user_id, CASE WHEN a.full_name IS NULL THEN NULL ELSE substr(a.full_name, 1, 1) || '.' END AS initial, v.id AS vehicle_id, v.plate, v.vehicle_class, v.seats FROM driver_availability d JOIN driver_applications a ON a.user_id = d.user_id JOIN driver_vehicles v ON v.user_id = d.user_id AND v.id = d.vehicle_id WHERE d.available = 1 AND a.status = 'approved' AND v.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND :__user_id IS NOT NULL ORDER BY d.updated_at LIMIT :limit",
       "params": {
         "limit": {
           "type": "integer",
@@ -764,9 +765,9 @@
     },
     {
       "name": "update_driver_location",
-      "description": "Driver: publish the caller's current position and the radius (0.5-50 km) they will serve around it. Only approved drivers; out-of-range values change nothing. Dispatch ignores locations older than 5 minutes, so keep publishing while online.",
+      "description": "Driver: publish the caller's current position and the radius (0.5-50 km) they will serve around it. Only approved drivers; out-of-range values change nothing. Dispatch ignores locations older than 5 minutes, so keep publishing while online. Requires the driver's location consent for dispatch_availability (set_location_consent); without it nothing is stored.",
       "operation": "execute",
-      "sql": "INSERT INTO driver_locations (user_id, lat, lng, service_radius_km, updated_at) SELECT :__user_id, :lat, :lng, :service_radius_km, :__now WHERE :lat BETWEEN -90 AND 90 AND :lng BETWEEN -180 AND 180 AND :service_radius_km BETWEEN 0.5 AND 50 AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :__user_id AND a.status = 'approved') ON CONFLICT (user_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, service_radius_km = excluded.service_radius_km, updated_at = excluded.updated_at",
+      "sql": "INSERT INTO driver_locations (user_id, lat, lng, service_radius_km, updated_at) SELECT :__user_id, :lat, :lng, :service_radius_km, :__now WHERE :lat BETWEEN -90 AND 90 AND :lng BETWEEN -180 AND 180 AND :service_radius_km BETWEEN 0.5 AND 50 AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :__user_id AND a.status = 'approved') AND EXISTS (SELECT 1 FROM location_consents c WHERE c.user_id = :__user_id AND c.purpose = 'dispatch_availability' AND c.granted = 1) ON CONFLICT (user_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, service_radius_km = excluded.service_radius_km, updated_at = excluded.updated_at",
       "params": {
         "lat": {
           "type": "number"
@@ -1323,12 +1324,12 @@
     },
     {
       "name": "publish_driver_location",
-      "description": "Driver: publish the assigned driver's position for a trip. Accepted only from the assigned driver while the trip is en_route or arrived (including in progress), never before they start driving or after the trip ends; at most one update per 3s (faster calls are dropped); implausible coordinates, accuracy (>500 m) or speed are dropped. Coordinates are rounded to 4 decimals (about 11 m) before storing. Only the latest position is kept, overwritten in place, and it is deleted when the trip ends; positions older than 24 hours are purged on every publish.",
+      "description": "Driver: publish the assigned driver's position for a trip. Accepted only from the assigned driver while the trip is en_route or arrived (including in progress), never before they start driving or after the trip ends; at most one update per 3s (faster calls are dropped); implausible coordinates, accuracy (>500 m) or speed are dropped. Coordinates are rounded to 4 decimals (about 11 m) before storing. Only the latest position is kept, overwritten in place, and it is deleted when the trip ends; positions older than 24 hours are purged on every publish. Requires the driver's location consent for trip_tracking (set_location_consent); without it nothing is stored.",
       "operation": "batch",
       "statements": [
         "DELETE FROM trip_evidence WHERE captured_at < :__now - 2592000000 AND :__user_id IS NOT NULL",
         "DELETE FROM trip_locations WHERE updated_at < :__now - 86400000 AND :__user_id IS NOT NULL",
-        "INSERT INTO trip_locations (rider_id, trip_id, driver_id, lat, lng, accuracy_m, speed_mps, updated_at) SELECT t.rider_id, t.id, :__user_id, ROUND(:lat, 4), ROUND(:lng, 4), :accuracy_m, :speed_mps, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.status IN ('en_route', 'arrived') AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND :lat BETWEEN -90 AND 90 AND :lng BETWEEN -180 AND 180 AND coalesce(:accuracy_m, 0) BETWEEN 0 AND 500 AND coalesce(:speed_mps, 0) BETWEEN 0 AND 70 ON CONFLICT (rider_id, trip_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, accuracy_m = excluded.accuracy_m, speed_mps = excluded.speed_mps, driver_id = excluded.driver_id, updated_at = excluded.updated_at WHERE :__now - trip_locations.updated_at >= 3000"
+        "INSERT INTO trip_locations (rider_id, trip_id, driver_id, lat, lng, accuracy_m, speed_mps, updated_at) SELECT t.rider_id, t.id, :__user_id, ROUND(:lat, 4), ROUND(:lng, 4), :accuracy_m, :speed_mps, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.status IN ('en_route', 'arrived') AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND :lat BETWEEN -90 AND 90 AND :lng BETWEEN -180 AND 180 AND coalesce(:accuracy_m, 0) BETWEEN 0 AND 500 AND coalesce(:speed_mps, 0) BETWEEN 0 AND 70 AND EXISTS (SELECT 1 FROM location_consents c WHERE c.user_id = :__user_id AND c.purpose = 'trip_tracking' AND c.granted = 1) ON CONFLICT (rider_id, trip_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, accuracy_m = excluded.accuracy_m, speed_mps = excluded.speed_mps, driver_id = excluded.driver_id, updated_at = excluded.updated_at WHERE :__now - trip_locations.updated_at >= 3000"
       ],
       "params": {
         "rider_id": {
@@ -1476,7 +1477,7 @@
     },
     {
       "name": "delete_my_driver_data",
-      "description": "Erase everything the caller owns as a driver: their application (licence data), vehicles, availability, last position and live location, and unlink their driver account from other riders' trips. Irreversible and idempotent. Account deletion calls this and delete_my_rider_data (a batch is limited to 25 statements). Driver review-log rows are kept for audit. Also erases the caller's diagnostic events and counters.",
+      "description": "Erase everything the caller owns as a driver: their application (licence data), vehicles, availability, last position and live location, and unlink their driver account from other riders' trips. Irreversible and idempotent. Account deletion calls this and delete_my_rider_data (a batch is limited to 25 statements). Driver review-log rows are kept for audit. Also erases the caller's diagnostic events and counters. Also erases the caller's location consent records.",
       "operation": "batch",
       "statements": [
         "DELETE FROM client_events WHERE user_id = :__user_id",
@@ -1486,7 +1487,8 @@
         "DELETE FROM driver_availability WHERE user_id = :__user_id",
         "DELETE FROM driver_vehicles WHERE user_id = :__user_id",
         "DELETE FROM driver_applications WHERE user_id = :__user_id",
-        "UPDATE drivers SET user_id = NULL WHERE user_id = :__user_id"
+        "UPDATE drivers SET user_id = NULL WHERE user_id = :__user_id",
+        "DELETE FROM location_consents WHERE user_id = :__user_id"
       ],
       "requires_auth": true
     },
@@ -2240,6 +2242,96 @@
           "ops"
         ]
       }
+    },
+    {
+      "name": "get_my_location_consents",
+      "description": "Any signed-in user: the caller's location consent record for each purpose (dispatch_availability: a driver's position while available for requests; trip_tracking: a driver's position during an assigned trip), the notice version agreed to and when it was granted or withdrawn.",
+      "operation": "query",
+      "sql": "SELECT purpose, granted, notice_version, granted_at, withdrawn_at, updated_at FROM location_consents WHERE user_id = :__user_id ORDER BY purpose",
+      "requires_auth": true
+    },
+    {
+      "name": "set_location_consent",
+      "description": "Any signed-in user: grant or withdraw consent to collect precise location for one purpose (dispatch_availability or trip_tracking), recording the notice version shown. Withdrawing erases what was collected under it straight away: dispatch_availability deletes the stored position, takes the driver offline and cancels open offers; trip_tracking deletes the driver's live trip positions. Invalid purposes or values change nothing.",
+      "operation": "batch",
+      "statements": [
+        "INSERT INTO location_consents (user_id, purpose, granted, notice_version, granted_at, withdrawn_at, updated_at) SELECT :__user_id, :purpose, :granted, :notice_version, CASE WHEN :granted = 1 THEN :__now END, CASE WHEN :granted = 0 THEN :__now END, :__now WHERE :purpose IN ('dispatch_availability', 'trip_tracking') AND :granted IN (0, 1) AND length(:notice_version) BETWEEN 1 AND 20 ON CONFLICT (user_id, purpose) DO UPDATE SET granted = excluded.granted, notice_version = excluded.notice_version, granted_at = CASE WHEN excluded.granted = 1 THEN excluded.updated_at ELSE location_consents.granted_at END, withdrawn_at = CASE WHEN excluded.granted = 0 THEN excluded.updated_at ELSE NULL END, updated_at = excluded.updated_at",
+        "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE driver_id = :__user_id AND status = 'offered' AND :purpose = 'dispatch_availability' AND :granted = 0",
+        "UPDATE driver_availability SET available = 0, updated_at = :__now WHERE user_id = :__user_id AND :purpose = 'dispatch_availability' AND :granted = 0",
+        "DELETE FROM driver_locations WHERE user_id = :__user_id AND :purpose = 'dispatch_availability' AND :granted = 0",
+        "DELETE FROM trip_locations WHERE driver_id = :__user_id AND :purpose = 'trip_tracking' AND :granted = 0"
+      ],
+      "params": {
+        "purpose": {
+          "type": "string"
+        },
+        "granted": {
+          "type": "integer"
+        },
+        "notice_version": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "purge_expired_data",
+      "description": "Any signed-in user: delete data past its retention period, for everyone. Idempotent and safe to call often. Periods: live trip positions and driver dispatch positions 24 hours, trip evidence snapshots 30 days, notifications 30 days, diagnostic events and counters 14 days. Other data classes are kept until the account is deleted; see docs/privacy.md.",
+      "operation": "batch",
+      "statements": [
+        "DELETE FROM trip_locations WHERE updated_at < :__now - 86400000 AND :__user_id IS NOT NULL",
+        "DELETE FROM driver_locations WHERE updated_at < :__now - 86400000 AND :__user_id IS NOT NULL",
+        "DELETE FROM trip_evidence WHERE captured_at < :__now - 2592000000 AND :__user_id IS NOT NULL",
+        "DELETE FROM notifications WHERE created_at < :__now - 2592000000 AND :__user_id IS NOT NULL",
+        "DELETE FROM client_events WHERE at < :__now - 1209600000 AND :__user_id IS NOT NULL",
+        "DELETE FROM client_metrics WHERE minute < CAST(:__now AS INTEGER) / 60000 - 20160 AND :__user_id IS NOT NULL"
+      ],
+      "requires_auth": true
+    },
+    {
+      "name": "export_rider_records",
+      "description": "Data export: one row per section (quotes, assignments, recorded_drivers, recorded_vehicles, dispatch_requests, fare_quotes, trip_lifecycle, trip_lifecycle_events, disputes, fare_statements, fare_adjustments, refund_requests), each a JSON array of the caller's own records as a rider. Excludes other people's data: the driver's payout split, staff notes and driver-opened disputes. Complements export_ride_requests, export_trips and export_trip_transitions.",
+      "operation": "query",
+      "sql": "SELECT 'quotes' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('rider_id', rider_id, 'id', id, 'request_id', request_id, 'vehicle_class', vehicle_class, 'fare_cents', fare_cents, 'eta_minutes', eta_minutes, 'status', status, 'created_at', created_at, 'updated_at', updated_at) AS o FROM quotes WHERE rider_id = :__user_id ORDER BY created_at LIMIT :limit) UNION ALL SELECT 'assignments' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('rider_id', rider_id, 'id', id, 'request_id', request_id, 'driver_id', driver_id, 'vehicle_id', vehicle_id, 'status', status, 'created_at', created_at, 'updated_at', updated_at) AS o FROM assignments WHERE rider_id = :__user_id ORDER BY created_at LIMIT :limit) UNION ALL SELECT 'recorded_drivers' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('id', id, 'display_name', display_name, 'rating', rating, 'status', status, 'created_at', created_at, 'updated_at', updated_at) AS o FROM drivers WHERE rider_id = :__user_id ORDER BY created_at LIMIT :limit) UNION ALL SELECT 'recorded_vehicles' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('id', id, 'driver_id', driver_id, 'plate', plate, 'vehicle_class', vehicle_class, 'created_at', created_at, 'updated_at', updated_at) AS o FROM vehicles WHERE rider_id = :__user_id ORDER BY created_at LIMIT :limit) UNION ALL SELECT 'dispatch_requests' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('rider_id', rider_id, 'request_id', request_id, 'status', status, 'pickup_lat', pickup_lat, 'pickup_lng', pickup_lng, 'vehicle_class', vehicle_class, 'attempts', attempts, 'started_at', started_at, 'deadline_at', deadline_at, 'updated_at', updated_at) AS o FROM dispatch_requests WHERE rider_id = :__user_id ORDER BY started_at LIMIT :limit) UNION ALL SELECT 'fare_quotes' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('rider_id', rider_id, 'id', id, 'pickup_label', pickup_label, 'pickup_lat', pickup_lat, 'pickup_lng', pickup_lng, 'dropoff_label', dropoff_label, 'dropoff_lat', dropoff_lat, 'dropoff_lng', dropoff_lng, 'distance_m', distance_m, 'duration_s', duration_s, 'vehicle_class', vehicle_class, 'base_cents', base_cents, 'distance_cents', distance_cents, 'time_cents', time_cents, 'booking_fee_cents', booking_fee_cents, 'min_adjust_cents', min_adjust_cents, 'surge_milli', surge_milli, 'total_cents', total_cents, 'nearby_drivers', nearby_drivers, 'status', status, 'expires_at', expires_at, 'created_at', created_at, 'accepted_at', accepted_at, 'ride_id', ride_id) AS o FROM fare_quotes WHERE rider_id = :__user_id ORDER BY created_at LIMIT :limit) UNION ALL SELECT 'trip_lifecycle' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('trip_id', trip_id, 'started_at', started_at, 'ended_at', ended_at, 'outcome', outcome, 'cancelled_by_role', cancelled_by_role, 'cancel_code', cancel_code, 'cancel_note', cancel_note, 'cancel_fee_cents', cancel_fee_cents, 'fee_policy', fee_policy, 'updated_at', updated_at) AS o FROM trip_lifecycle WHERE rider_id = :__user_id ORDER BY updated_at LIMIT :limit) UNION ALL SELECT 'trip_lifecycle_events' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('id', id, 'trip_id', trip_id, 'event', event, 'actor_role', actor_role, 'reason_code', reason_code, 'note', note, 'amount_cents', amount_cents, 'at', at) AS o FROM trip_lifecycle_events WHERE rider_id = :__user_id ORDER BY at LIMIT :limit) UNION ALL SELECT 'disputes' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('rider_id', rider_id, 'trip_id', trip_id, 'opened_role', opened_role, 'reason_code', reason_code, 'note', note, 'status', status, 'opened_at', opened_at, 'decision', decision, 'resolution_note', resolution_note, 'resolved_at', resolved_at, 'fee_waived', fee_waived) AS o FROM trip_disputes WHERE opened_by = :__user_id ORDER BY opened_at LIMIT :limit) UNION ALL SELECT 'fare_statements' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('receipt_no', receipt_no, 'trip_id', trip_id, 'request_id', request_id, 'basis', basis, 'currency', currency, 'outcome', outcome, 'quoted_cents', quoted_cents, 'base_cents', base_cents, 'distance_cents', distance_cents, 'time_cents', time_cents, 'booking_fee_cents', booking_fee_cents, 'min_adjust_cents', min_adjust_cents, 'surge_milli', surge_milli, 'final_cents', final_cents, 'tax_rate_bp', tax_rate_bp, 'tax_cents', tax_cents, 'policy_version', policy_version, 'pickup_label', pickup_label, 'dropoff_label', dropoff_label, 'finalized_at', finalized_at) AS o FROM fare_statements WHERE rider_id = :__user_id ORDER BY finalized_at LIMIT :limit) UNION ALL SELECT 'fare_adjustments' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('id', id, 'trip_id', trip_id, 'kind', kind, 'amount_cents', amount_cents, 'reason_code', reason_code, 'note', note, 'created_at', created_at) AS o FROM fare_adjustments WHERE rider_id = :__user_id ORDER BY created_at LIMIT :limit) UNION ALL SELECT 'refund_requests' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('id', id, 'trip_id', trip_id, 'amount_cents', amount_cents, 'reason_code', reason_code, 'status', status, 'requested_at', requested_at, 'decided_at', decided_at) AS o FROM refund_requests WHERE rider_id = :__user_id ORDER BY requested_at LIMIT :limit)",
+      "params": {
+        "limit": {
+          "type": "integer",
+          "default": 1000,
+          "max": 5000,
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "export_driver_records",
+      "description": "Data export: one row per section (locations, offers), each a JSON array of what the app holds about the caller as a driver. locations has the dispatch position (source dispatch) and the live position of each assigned trip (source trip). Complements get_my_driver_application, list_my_driver_vehicles, get_my_driver_availability, list_my_driver_review_log, list_driver_trips and list_my_earnings.",
+      "operation": "query",
+      "sql": "SELECT 'locations' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('source', 'dispatch', 'trip_id', NULL, 'lat', lat, 'lng', lng, 'accuracy_m', NULL, 'service_radius_km', service_radius_km, 'updated_at', updated_at) AS o FROM driver_locations WHERE user_id = :__user_id UNION ALL SELECT json_object('source', 'trip', 'trip_id', trip_id, 'lat', lat, 'lng', lng, 'accuracy_m', accuracy_m, 'service_radius_km', NULL, 'updated_at', updated_at) FROM trip_locations WHERE driver_id = :__user_id LIMIT :limit) UNION ALL SELECT 'offers' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('request_id', request_id, 'attempt', attempt, 'status', status, 'distance_km2', distance_km2, 'offered_at', offered_at, 'expires_at', expires_at, 'responded_at', responded_at) AS o FROM dispatch_offers WHERE driver_id = :__user_id ORDER BY offered_at LIMIT :limit)",
+      "params": {
+        "limit": {
+          "type": "integer",
+          "default": 1000,
+          "max": 5000,
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "export_account_records",
+      "description": "Data export: one row per section (notification_prefs, notifications, location_consents, client_events), each a JSON array of the caller's own records, whichever role they use the app in.",
+      "operation": "query",
+      "sql": "SELECT 'notification_prefs' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('locale', locale, 'push', push, 'email_fallback', email_fallback, 'email_consent_at', email_consent_at, 'updated_at', updated_at) AS o FROM notification_prefs WHERE user_id = :__user_id ORDER BY updated_at LIMIT :limit) UNION ALL SELECT 'notifications' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('id', id, 'kind', kind, 'role', role, 'trip_id', trip_id, 'request_id', request_id, 'rider_id', rider_id, 'link', link, 'params', params, 'critical', critical, 'created_at', created_at, 'read_at', read_at, 'push_status', push_status, 'email_status', email_status) AS o FROM notifications WHERE user_id = :__user_id ORDER BY created_at LIMIT :limit) UNION ALL SELECT 'location_consents' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('purpose', purpose, 'granted', granted, 'notice_version', notice_version, 'granted_at', granted_at, 'withdrawn_at', withdrawn_at, 'updated_at', updated_at) AS o FROM location_consents WHERE user_id = :__user_id ORDER BY purpose LIMIT :limit) UNION ALL SELECT 'client_events' AS section, json_group_array(json(o)) AS records FROM (SELECT json_object('at', at, 'domain', domain, 'code', code, 'action', action, 'status', status, 'latency_ms', latency_ms, 'trip_id', trip_id, 'request_id', request_id, 'severity', severity, 'detail', detail) AS o FROM client_events WHERE user_id = :__user_id ORDER BY at LIMIT :limit)",
+      "params": {
+        "limit": {
+          "type": "integer",
+          "default": 1000,
+          "max": 5000,
+          "optional": true
+        }
+      },
+      "requires_auth": true
     }
   ]
 }

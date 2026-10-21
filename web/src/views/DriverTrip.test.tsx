@@ -18,6 +18,16 @@ vi.mock('../lib/tripLifecycle', async (importOriginal) => ({
   ...api,
 }))
 
+const { consent } = vi.hoisted(() => ({ consent: { granted: true, set: vi.fn(async (_p: string, _g: boolean) => undefined) } }))
+vi.mock('../lib/privacy', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../lib/privacy')>()
+  return {
+    ...real,
+    loadConsents: async () => (consent.granted ? { trip_tracking: { granted: true, noticeVersion: real.NOTICE_VERSION, grantedAt: 1, withdrawnAt: null } } : {}),
+    setLocationConsent: async (p: string, g: boolean) => { consent.granted = g; return consent.set(p, g) },
+  }
+})
+
 const { earnings, tel } = vi.hoisted(() => ({ earnings: { rows: [] as Record<string, unknown>[] }, tel: { reportError: vi.fn() } }))
 vi.mock('../lib/telemetry', async (importOriginal) => ({ ...(await importOriginal<typeof import('../lib/telemetry')>()), reportError: tel.reportError }))
 vi.mock('../lib/receipts', async (importOriginal) => ({ ...(await importOriginal<typeof import('../lib/receipts')>()), loadEarnings: async () => earnings.rows }))
@@ -29,6 +39,8 @@ const trip = (extra: Record<string, unknown> = {}) => ({ tripId: 'r1:trip', requ
 const mount = () => render(renderWithRouter(<DriverTrip riderId="rider-1" rideId="r1" />, '/driver/trip/rider-1/r1').ui)
 
 beforeEach(() => {
+  consent.granted = true
+  consent.set.mockClear()
   tel.reportError.mockReset()
   earnings.rows = []
   current.trip = trip()
@@ -128,6 +140,49 @@ describe('DriverTrip', () => {
       mount()
       await screen.findByText('Driving to pickup')
       expect(screen.queryByRole('status', { name: 'Earnings' })).not.toBeInTheDocument()
+    })
+  })
+
+  describe('location consent', () => {
+    it('does not read or send the position until the driver has agreed, and says so', async () => {
+      consent.granted = false
+      current.trip = trip({ phase: 'en_route' })
+      mount()
+      expect(await screen.findByRole('region', { name: 'Location during a trip' })).toHaveTextContent(/removed after 24 hours at the latest/)
+      expect(screen.getByText("Location sharing is off. The rider can't see you.")).toBeInTheDocument()
+      expect(geo.watch).not.toHaveBeenCalled()
+      expect(publishLocation).not.toHaveBeenCalled()
+      // The trip itself still works without sharing.
+      expect(screen.getByRole('button', { name: "I've arrived" })).toBeEnabled()
+    })
+
+    it('starts sharing once the driver agrees, recording the purpose', async () => {
+      consent.granted = false
+      current.trip = trip({ phase: 'en_route' })
+      mount()
+      await userEvent.click(await screen.findByRole('button', { name: 'Allow' }))
+      expect(consent.set).toHaveBeenCalledWith('trip_tracking', true)
+      await waitFor(() => expect(geo.watch).toHaveBeenCalled())
+      await waitFor(() => expect(publishLocation).toHaveBeenCalled())
+      expect(await screen.findByText(/Sharing your live location/)).toBeInTheDocument()
+    })
+
+    it('stops reading the position when the driver withdraws mid-trip', async () => {
+      current.trip = trip({ phase: 'en_route' })
+      mount()
+      await waitFor(() => expect(geo.watch).toHaveBeenCalled())
+      await userEvent.click(await screen.findByRole('button', { name: 'Stop sharing' }))
+      expect(consent.set).toHaveBeenCalledWith('trip_tracking', false)
+      await waitFor(() => expect(geo.clear).toHaveBeenCalled())
+      expect(await screen.findByText("Location sharing is off. The rider can't see you.")).toBeInTheDocument()
+    })
+
+    it('does not ask before the driver is driving', async () => {
+      consent.granted = false
+      current.trip = trip({ phase: 'scheduled' })
+      mount()
+      await screen.findByText('Central → Airport')
+      expect(screen.queryByRole('region', { name: 'Location during a trip' })).not.toBeInTheDocument()
     })
   })
 
