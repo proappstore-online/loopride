@@ -41,7 +41,7 @@ function migrate(db: Db, applied: Set<string>) {
 
 function call(db: Db, name: string, params: Record<string, unknown>, userId: string, now = 1_000) {
   const t = tool(name)
-  const bound: Record<string, unknown> = { __user_id: userId, __now: now }
+  const bound: Record<string, unknown> = { __user_id: userId, __now: now, __uuid: crypto.randomUUID() }
   for (const [key, spec] of Object.entries(t.params ?? {})) {
     const value = params[key]
     if (value === undefined || value === null) {
@@ -443,5 +443,244 @@ describe('rider account data', () => {
     call(db, 'delete_my_rider_data', {}, 'driver-1')
     expect(call(db, 'list_driver_trips', {}, 'driver-1')).toEqual([])
     expect(count(db, 'trips')).toBe(1)
+  })
+})
+
+describe('driver onboarding, approval and dispatch eligibility', () => {
+  let db: Db
+  const NOW = Date.UTC(2026, 5, 1)
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const application = {
+    full_name: 'Dana Driver',
+    phone: '555-0100',
+    licence_number: 'D1234567',
+    licence_region: 'NSW',
+    licence_expires: '2030-01-01',
+    eligibility_confirmed: 1,
+  }
+  const vehicle = { vehicle_id: 'v1', plate: 'RS-482', make: 'Toyota', model: 'Camry', year: 2022, colour: 'white', seats: 4, vehicle_class: 'comfort' }
+  const as = (user: string, name: string, params: Record<string, unknown> = {}, now = NOW) => call(db, name, params, user, now)
+  const appStatus = (user = 'drv') => (db.prepare('SELECT status FROM driver_applications WHERE user_id = ?').get(user) as { status: string } | undefined)?.status
+  const vehicleStatus = (id = 'v1') => (db.prepare('SELECT status FROM driver_vehicles WHERE id = ?').get(id) as { status: string }).status
+  const review = (decision: string, reason?: string, actor = 'ops-1', now = NOW) =>
+    as(actor, 'review_driver_application', { driver_user_id: 'drv', decision, reason }, now)
+  const submitted = () => {
+    as('drv', 'save_driver_application', application)
+    as('drv', 'save_driver_vehicle', vehicle)
+    as('drv', 'submit_driver_application')
+  }
+  const approved = () => {
+    submitted()
+    review('approved')
+  }
+  const dispatchable = () => as('ops-1', 'list_dispatchable_drivers')
+  const goAvailable = (now = NOW) => as('drv', 'set_driver_availability', { available: 1, vehicle_id: 'v1' }, now)
+
+  it('ops tools are gated by the ops app role; applicant tools are not', () => {
+    const opsTools = ['list_driver_applications', 'get_driver_application_detail', 'list_driver_vehicles_for_review', 'list_driver_review_log', 'review_driver_application', 'review_driver_vehicle', 'list_dispatchable_drivers']
+    for (const name of opsTools) expect(tool(name), name).toMatchObject({ auth: { required: true, app_roles: ['ops'] } })
+    for (const name of ['save_driver_application', 'submit_driver_application', 'save_driver_vehicle', 'set_driver_availability', 'get_my_driver_application'])
+      expect((tool(name) as unknown as { auth?: unknown }).auth, name).toBeUndefined()
+  })
+
+  it('captures profile, licence and eligibility; submit needs everything', () => {
+    as('drv', 'submit_driver_application') // nothing yet
+    expect(appStatus()).toBeUndefined()
+    as('drv', 'save_driver_application', { ...application, licence_number: undefined })
+    as('drv', 'save_driver_vehicle', vehicle)
+    as('drv', 'submit_driver_application')
+    expect(appStatus()).toBe('draft') // licence number missing
+    as('drv', 'save_driver_application', { ...application, eligibility_confirmed: 0 })
+    as('drv', 'submit_driver_application')
+    expect(appStatus()).toBe('draft') // eligibility not confirmed
+    as('drv', 'save_driver_application', application)
+    as('drv', 'submit_driver_application')
+    expect(appStatus()).toBe('submitted')
+    expect(as('drv', 'get_my_driver_application')).toMatchObject([{ status: 'submitted', licence_number: 'D1234567' }])
+  })
+
+  it('submit needs at least one vehicle', () => {
+    as('drv', 'save_driver_application', application)
+    as('drv', 'submit_driver_application')
+    expect(appStatus()).toBe('draft')
+  })
+
+  it('locks the application once submitted', () => {
+    submitted()
+    as('drv', 'save_driver_application', { ...application, full_name: 'Changed' })
+    expect(db.prepare('SELECT full_name FROM driver_applications').get()).toEqual({ full_name: 'Dana Driver' })
+  })
+
+  it('keeps one driver\'s data invisible to another applicant', () => {
+    submitted()
+    expect(as('other', 'get_my_driver_application')).toEqual([])
+    expect(as('other', 'list_my_driver_vehicles')).toEqual([])
+    expect(as('other', 'list_my_driver_review_log')).toEqual([])
+  })
+
+  it('ops list masks the licence number; detail shows it', () => {
+    submitted()
+    const [row] = as('ops-1', 'list_driver_applications', { status: 'submitted' }) as Record<string, unknown>[]
+    expect(row).toMatchObject({ user_id: 'drv', licence_last4: '4567', vehicle_count: 1 })
+    expect(JSON.stringify(row)).not.toContain('D1234567')
+    expect(as('ops-1', 'get_driver_application_detail', { driver_user_id: 'drv' })).toMatchObject([{ licence_number: 'D1234567' }])
+    expect(as('ops-1', 'list_driver_applications', { status: 'approved' })).toEqual([])
+  })
+
+  it('approval audits actor and time, and approves the pending vehicle', () => {
+    submitted()
+    review('approved', undefined, 'ops-1', NOW + 5)
+    expect(appStatus()).toBe('approved')
+    expect(vehicleStatus()).toBe('approved')
+    expect(db.prepare('SELECT user_id, from_status, to_status, reason, actor_id, actor_role, at FROM driver_review_log ORDER BY at, rowid').all()).toEqual([
+      { user_id: 'drv', from_status: 'draft', to_status: 'submitted', reason: null, actor_id: 'drv', actor_role: 'applicant', at: NOW },
+      { user_id: 'drv', from_status: 'submitted', to_status: 'approved', reason: null, actor_id: 'ops-1', actor_role: 'ops', at: NOW + 5 },
+    ])
+  })
+
+  it('rejection needs a reason, records it, and lets the driver fix and resubmit', () => {
+    submitted()
+    review('rejected')
+    review('rejected', '   ')
+    expect(appStatus()).toBe('submitted') // no reason, no decision, no audit row
+    expect(count(db, 'driver_review_log')).toBe(1)
+    review('rejected', 'Licence photo unreadable')
+    expect(as('drv', 'get_my_driver_application')).toMatchObject([{ status: 'rejected', status_reason: 'Licence photo unreadable' }])
+    as('drv', 'save_driver_application', { ...application, licence_number: 'D7654321' })
+    as('drv', 'submit_driver_application')
+    expect(appStatus()).toBe('submitted')
+    expect(as('drv', 'get_my_driver_application')).toMatchObject([{ status_reason: null, licence_number: 'D7654321' }])
+    expect((as('drv', 'list_my_driver_review_log') as { to_status: string }[]).map((l) => l.to_status)).toEqual(['submitted', 'rejected', 'submitted'])
+  })
+
+  it('only allows valid decision transitions', () => {
+    as('drv', 'save_driver_application', application)
+    review('approved') // still a draft
+    expect(appStatus()).toBe('draft')
+    submitted()
+    review('suspended', 'too early') // submitted cannot be suspended
+    expect(appStatus()).toBe('submitted')
+    review('approved')
+    review('rejected', 'late') // approved cannot be rejected
+    expect(appStatus()).toBe('approved')
+    review('banana', 'x')
+    expect(appStatus()).toBe('approved')
+    review('suspended', 'complaint')
+    expect(appStatus()).toBe('suspended')
+    review('approved')
+    expect(appStatus()).toBe('approved') // reinstated
+  })
+
+  it('an ops user cannot review their own application', () => {
+    as('ops-1', 'save_driver_application', application)
+    as('ops-1', 'save_driver_vehicle', vehicle)
+    as('ops-1', 'submit_driver_application')
+    as('ops-1', 'review_driver_application', { driver_user_id: 'ops-1', decision: 'approved' })
+    expect(appStatus('ops-1')).toBe('submitted')
+    expect(as('ops-1', 'list_driver_applications')).toEqual([])
+  })
+
+  it('only approved drivers with an approved vehicle can be available', () => {
+    goAvailable() // no application at all
+    expect(as('drv', 'get_my_driver_availability')).toEqual([])
+    submitted()
+    goAvailable() // submitted only
+    expect(as('drv', 'get_my_driver_availability')).toEqual([])
+    review('approved')
+    goAvailable()
+    expect(as('drv', 'get_my_driver_availability')).toMatchObject([{ available: 1, vehicle_id: 'v1' }])
+    expect(dispatchable()).toMatchObject([{ user_id: 'drv', plate: 'RS-482', vehicle_class: 'comfort' }])
+  })
+
+  it('cannot go available with someone else\'s or an unapproved vehicle', () => {
+    approved()
+    as('drv', 'save_driver_vehicle', { ...vehicle, vehicle_id: 'v2', plate: 'NEW-1' }) // pending
+    as('drv', 'set_driver_availability', { available: 1, vehicle_id: 'v2' })
+    expect(as('drv', 'get_my_driver_availability')).toEqual([])
+    as('drv', 'set_driver_availability', { available: 1, vehicle_id: 'missing' })
+    expect(as('drv', 'get_my_driver_availability')).toEqual([])
+  })
+
+  it('suspension and rejection take a driver off dispatch immediately', () => {
+    approved()
+    goAvailable()
+    expect(dispatchable()).toHaveLength(1)
+    review('suspended', 'safety report')
+    expect(dispatchable()).toEqual([])
+    expect(as('drv', 'get_my_driver_availability')).toMatchObject([{ available: 0 }])
+    goAvailable() // suspended drivers cannot return themselves
+    expect(as('drv', 'get_my_driver_availability')).toMatchObject([{ available: 0 }])
+    review('approved') // reinstated, but must opt in again
+    expect(dispatchable()).toEqual([])
+    goAvailable()
+    expect(dispatchable()).toHaveLength(1)
+  })
+
+  it('a stale available flag does not make a suspended driver dispatchable', () => {
+    approved()
+    goAvailable()
+    db.prepare("UPDATE driver_applications SET status = 'suspended'").run() // simulate an out-of-band change
+    expect(dispatchable()).toEqual([])
+  })
+
+  it('an expired licence blocks availability and drops the driver from dispatch', () => {
+    approved()
+    goAvailable()
+    expect(dispatchable()).toHaveLength(1)
+    const later = Date.UTC(2031, 0, 1)
+    expect(as('ops-1', 'list_dispatchable_drivers', {}, later)).toEqual([])
+    as('drv', 'set_driver_availability', { available: 0 }, later)
+    goAvailable(later)
+    expect(as('drv', 'get_my_driver_availability')).toMatchObject([{ available: 0 }])
+  })
+
+  it('editing an approved vehicle sends it back to review and off dispatch; unchanged saves do not', () => {
+    approved()
+    goAvailable()
+    as('drv', 'save_driver_vehicle', vehicle)
+    expect(vehicleStatus()).toBe('approved')
+    expect(dispatchable()).toHaveLength(1)
+    as('drv', 'save_driver_vehicle', { ...vehicle, plate: 'NEW-9' })
+    expect(vehicleStatus()).toBe('pending')
+    expect(as('drv', 'get_my_driver_availability')).toMatchObject([{ available: 0 }])
+    expect(dispatchable()).toEqual([])
+    as('ops-1', 'review_driver_vehicle', { driver_user_id: 'drv', vehicle_id: 'v1', decision: 'approved' })
+    expect(vehicleStatus()).toBe('approved')
+  })
+
+  it('vehicle rejection needs a reason, is audited, and removes the vehicle from dispatch', () => {
+    approved()
+    goAvailable()
+    const rv = (decision: string, reason?: string) => as('ops-1', 'review_driver_vehicle', { driver_user_id: 'drv', vehicle_id: 'v1', decision, reason })
+    rv('rejected')
+    expect(vehicleStatus()).toBe('approved')
+    rv('rejected', 'Plate does not match registration')
+    expect(vehicleStatus()).toBe('rejected')
+    expect(dispatchable()).toEqual([])
+    expect(as('drv', 'list_my_driver_vehicles')).toMatchObject([{ status: 'rejected', status_reason: 'Plate does not match registration' }])
+    expect(db.prepare("SELECT to_status, actor_role, vehicle_id FROM driver_review_log WHERE vehicle_id = 'v1'").all()).toEqual([
+      { to_status: 'rejected', actor_role: 'ops', vehicle_id: 'v1' },
+    ])
+  })
+
+  it('deleting the active vehicle takes the driver off dispatch', () => {
+    approved()
+    goAvailable()
+    as('drv', 'delete_driver_vehicle', { vehicle_id: 'v1' })
+    expect(count(db, 'driver_vehicles')).toBe(0)
+    expect(dispatchable()).toEqual([])
+    expect(as('drv', 'get_my_driver_availability')).toMatchObject([{ available: 0 }])
+  })
+
+  it('vehicles are per driver even when ids collide', () => {
+    as('drv', 'save_driver_vehicle', vehicle)
+    as('other', 'save_driver_vehicle', { ...vehicle, plate: 'OTHER' })
+    as('other', 'delete_driver_vehicle', { vehicle_id: 'v1' })
+    expect(as('drv', 'list_my_driver_vehicles')).toMatchObject([{ plate: 'RS-482' }])
   })
 })

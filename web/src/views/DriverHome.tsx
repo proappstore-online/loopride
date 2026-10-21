@@ -26,6 +26,7 @@ export default function DriverHome() {
           </div>
         </div>
         <p className="text-sm text-[var(--muted)]">Nearby trip requests and reservations.</p>
+        <button onClick={() => setLocation('/driver/onboarding')} className="mt-3 rounded-full border border-[var(--line)] px-3 py-1 text-xs font-bold text-[var(--ink)] hover:bg-[var(--accent-soft)]">Driver application and vehicles</button>
       </header>
 
       {rides.length === 0 ? (

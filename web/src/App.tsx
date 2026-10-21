@@ -7,6 +7,8 @@ import Trip from './views/Trip'
 import DriverHome from './views/DriverHome'
 import DriverTrip from './views/DriverTrip'
 import Account from './views/Account'
+import DriverOnboarding from './views/DriverOnboarding'
+import Ops from './views/Ops'
 import { getRole, setRole } from './lib/mode'
 import { clearShareHash, decodeShareHash } from './lib/share'
 import { getRide, saveRide } from './storage'
@@ -72,6 +74,8 @@ export default function App() {
         {(params) => <Trip rideId={params.rideId} />}
       </Route>
       <Route path="/driver" component={DriverHome} />
+      <Route path="/driver/onboarding" component={DriverOnboarding} />
+      <Route path="/ops" component={Ops} />
       <Route path="/driver/:rideId">
         {(params) => <DriverTrip rideId={params.rideId} />}
       </Route>

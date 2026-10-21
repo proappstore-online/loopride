@@ -413,6 +413,309 @@
         "UPDATE drivers SET user_id = NULL WHERE user_id = :__user_id"
       ],
       "requires_auth": true
+    },
+    {
+      "name": "get_my_driver_application",
+      "description": "The caller's own driver application, status and the reason for the last decision (no row until started)",
+      "operation": "query",
+      "sql": "SELECT status, full_name, phone, licence_number, licence_region, licence_expires, eligibility_confirmed, status_reason, submitted_at, reviewed_at, updated_at FROM driver_applications WHERE user_id = :__user_id",
+      "requires_auth": true
+    },
+    {
+      "name": "save_driver_application",
+      "description": "Create or edit the caller's driver application (profile, licence and eligibility). Only while it is a draft or was rejected; submitted, approved and suspended applications are locked. Licence details are private: visible only to the applicant and ops.",
+      "operation": "execute",
+      "sql": "INSERT INTO driver_applications (user_id, status, full_name, phone, licence_number, licence_region, licence_expires, eligibility_confirmed, created_at, updated_at) VALUES (:__user_id, 'draft', :full_name, :phone, :licence_number, :licence_region, :licence_expires, :eligibility_confirmed, :__now, :__now) ON CONFLICT (user_id) DO UPDATE SET full_name = excluded.full_name, phone = excluded.phone, licence_number = excluded.licence_number, licence_region = excluded.licence_region, licence_expires = excluded.licence_expires, eligibility_confirmed = excluded.eligibility_confirmed, updated_at = excluded.updated_at WHERE driver_applications.status IN ('draft', 'rejected')",
+      "params": {
+        "full_name": {
+          "type": "string",
+          "optional": true
+        },
+        "phone": {
+          "type": "string",
+          "optional": true
+        },
+        "licence_number": {
+          "type": "string",
+          "optional": true
+        },
+        "licence_region": {
+          "type": "string",
+          "optional": true
+        },
+        "licence_expires": {
+          "type": "string",
+          "optional": true
+        },
+        "eligibility_confirmed": {
+          "type": "integer"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "list_my_driver_vehicles",
+      "description": "The caller's vehicles with their approval status and reason",
+      "operation": "query",
+      "sql": "SELECT id, plate, make, model, year, colour, seats, vehicle_class, status, status_reason FROM driver_vehicles WHERE user_id = :__user_id ORDER BY created_at",
+      "requires_auth": true
+    },
+    {
+      "name": "save_driver_vehicle",
+      "description": "Add or edit one of the caller's vehicles. Changing any detail of an existing vehicle sends it back to pending review and takes the driver off dispatch if it was the active vehicle.",
+      "operation": "batch",
+      "statements": [
+        "INSERT INTO driver_vehicles (user_id, id, plate, make, model, year, colour, seats, vehicle_class, status, created_at, updated_at) VALUES (:__user_id, :vehicle_id, :plate, :make, :model, :year, :colour, :seats, :vehicle_class, 'pending', :__now, :__now) ON CONFLICT (user_id, id) DO UPDATE SET status = CASE WHEN driver_vehicles.plate IS excluded.plate AND driver_vehicles.make IS excluded.make AND driver_vehicles.model IS excluded.model AND driver_vehicles.year IS excluded.year AND driver_vehicles.colour IS excluded.colour AND driver_vehicles.seats IS excluded.seats AND driver_vehicles.vehicle_class IS excluded.vehicle_class THEN driver_vehicles.status ELSE 'pending' END, plate = excluded.plate, make = excluded.make, model = excluded.model, year = excluded.year, colour = excluded.colour, seats = excluded.seats, vehicle_class = excluded.vehicle_class, updated_at = excluded.updated_at",
+        "UPDATE driver_availability SET available = 0, updated_at = :__now WHERE user_id = :__user_id AND vehicle_id = :vehicle_id AND NOT EXISTS (SELECT 1 FROM driver_vehicles v WHERE v.user_id = :__user_id AND v.id = :vehicle_id AND v.status = 'approved')"
+      ],
+      "params": {
+        "vehicle_id": {
+          "type": "string"
+        },
+        "plate": {
+          "type": "string"
+        },
+        "make": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "year": {
+          "type": "integer",
+          "optional": true
+        },
+        "colour": {
+          "type": "string",
+          "optional": true
+        },
+        "seats": {
+          "type": "integer",
+          "optional": true
+        },
+        "vehicle_class": {
+          "type": "string",
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "delete_driver_vehicle",
+      "description": "Remove one of the caller's vehicles (and take the driver off dispatch if it was the active vehicle)",
+      "operation": "batch",
+      "statements": [
+        "UPDATE driver_availability SET available = 0, updated_at = :__now WHERE user_id = :__user_id AND vehicle_id = :vehicle_id",
+        "DELETE FROM driver_vehicles WHERE user_id = :__user_id AND id = :vehicle_id"
+      ],
+      "params": {
+        "vehicle_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "submit_driver_application",
+      "description": "Submit the caller's application for review. Needs name, phone, licence number/region/expiry, confirmed eligibility and at least one vehicle. Only from draft or rejected. Audited.",
+      "operation": "batch",
+      "statements": [
+        "INSERT INTO driver_review_log (id, user_id, vehicle_id, from_status, to_status, reason, actor_id, actor_role, at) SELECT :__uuid, a.user_id, NULL, a.status, 'submitted', NULL, :__user_id, 'applicant', :__now FROM driver_applications a WHERE a.user_id = :__user_id AND a.status IN ('draft', 'rejected') AND a.full_name IS NOT NULL AND trim(a.full_name) != '' AND a.phone IS NOT NULL AND trim(a.phone) != '' AND a.licence_number IS NOT NULL AND trim(a.licence_number) != '' AND a.licence_region IS NOT NULL AND trim(a.licence_region) != '' AND a.licence_expires IS NOT NULL AND trim(a.licence_expires) != '' AND a.eligibility_confirmed = 1 AND EXISTS (SELECT 1 FROM driver_vehicles v WHERE v.user_id = a.user_id)",
+        "UPDATE driver_applications SET status = 'submitted', status_reason = NULL, submitted_at = :__now, updated_at = :__now WHERE user_id = :__user_id AND status IN ('draft', 'rejected') AND full_name IS NOT NULL AND trim(full_name) != '' AND phone IS NOT NULL AND trim(phone) != '' AND licence_number IS NOT NULL AND trim(licence_number) != '' AND licence_region IS NOT NULL AND trim(licence_region) != '' AND licence_expires IS NOT NULL AND trim(licence_expires) != '' AND eligibility_confirmed = 1 AND EXISTS (SELECT 1 FROM driver_vehicles v WHERE v.user_id = driver_applications.user_id)"
+      ],
+      "requires_auth": true
+    },
+    {
+      "name": "list_my_driver_review_log",
+      "description": "The audit trail of decisions on the caller's application and vehicles, oldest first",
+      "operation": "query",
+      "sql": "SELECT vehicle_id, from_status, to_status, reason, actor_role, at FROM driver_review_log WHERE user_id = :__user_id ORDER BY at, rowid",
+      "requires_auth": true
+    },
+    {
+      "name": "get_my_driver_availability",
+      "description": "Whether the caller is currently available for dispatch, and with which vehicle",
+      "operation": "query",
+      "sql": "SELECT available, vehicle_id, updated_at FROM driver_availability WHERE user_id = :__user_id",
+      "requires_auth": true
+    },
+    {
+      "name": "set_driver_availability",
+      "description": "Go on or off dispatch. Going available only works for an approved (not suspended) driver with an unexpired licence and an approved vehicle; otherwise nothing changes. Going unavailable always works.",
+      "operation": "execute",
+      "sql": "INSERT INTO driver_availability (user_id, available, vehicle_id, updated_at) SELECT :__user_id, :available, :vehicle_id, :__now WHERE :available = 0 OR EXISTS (SELECT 1 FROM driver_applications a JOIN driver_vehicles v ON v.user_id = a.user_id WHERE a.user_id = :__user_id AND a.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND v.id = :vehicle_id AND v.status = 'approved') ON CONFLICT (user_id) DO UPDATE SET available = excluded.available, vehicle_id = COALESCE(excluded.vehicle_id, driver_availability.vehicle_id), updated_at = excluded.updated_at",
+      "params": {
+        "available": {
+          "type": "integer"
+        },
+        "vehicle_id": {
+          "type": "string",
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "list_driver_applications",
+      "description": "Ops: driver applications, oldest submission first, optionally by status. Licence number is masked to its last 4 characters. Excludes the caller's own application.",
+      "operation": "query",
+      "sql": "SELECT a.user_id, a.status, a.full_name, a.phone, substr(a.licence_number, -4) AS licence_last4, a.licence_region, a.licence_expires, a.submitted_at, a.updated_at, (SELECT COUNT(*) FROM driver_vehicles v WHERE v.user_id = a.user_id) AS vehicle_count FROM driver_applications a WHERE a.user_id != :__user_id AND (:status IS NULL OR a.status = :status) ORDER BY a.submitted_at LIMIT :limit",
+      "params": {
+        "status": {
+          "type": "string",
+          "optional": true
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50,
+          "max": 200,
+          "optional": true
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "get_driver_application_detail",
+      "description": "Ops: one application in full, including the licence number, for verification",
+      "operation": "query",
+      "sql": "SELECT user_id, status, full_name, phone, licence_number, licence_region, licence_expires, eligibility_confirmed, status_reason, submitted_at, reviewed_at, reviewed_by FROM driver_applications WHERE user_id = :driver_user_id AND user_id != :__user_id",
+      "params": {
+        "driver_user_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "list_driver_vehicles_for_review",
+      "description": "Ops: a driver's vehicles",
+      "operation": "query",
+      "sql": "SELECT id, plate, make, model, year, colour, seats, vehicle_class, status, status_reason FROM driver_vehicles WHERE user_id = :driver_user_id AND user_id != :__user_id ORDER BY created_at",
+      "params": {
+        "driver_user_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "list_driver_review_log",
+      "description": "Ops: the audit trail for one driver (who decided what, when and why), oldest first",
+      "operation": "query",
+      "sql": "SELECT vehicle_id, from_status, to_status, reason, actor_id, actor_role, at FROM driver_review_log WHERE user_id = :driver_user_id AND user_id != :__user_id ORDER BY at, rowid",
+      "params": {
+        "driver_user_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "review_driver_application",
+      "description": "Ops: decide an application. submitted -> approved|rejected, approved -> suspended, suspended -> approved. Rejecting and suspending need a reason. Approving from submitted also approves the driver's pending vehicles; rejecting or suspending takes the driver off dispatch. Cannot review your own application. Every decision is audited with actor and reason; an invalid move changes nothing.",
+      "operation": "batch",
+      "statements": [
+        "INSERT INTO driver_review_log (id, user_id, vehicle_id, from_status, to_status, reason, actor_id, actor_role, at) SELECT :__uuid, a.user_id, NULL, a.status, :decision, :reason, :__user_id, 'ops', :__now FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND ((a.status = 'submitted' AND :decision IN ('approved', 'rejected')) OR (a.status = 'approved' AND :decision = 'suspended') OR (a.status = 'suspended' AND :decision = 'approved')) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0)",
+        "UPDATE driver_vehicles SET status = 'approved', status_reason = NULL, updated_at = :__now WHERE user_id = :driver_user_id AND status = 'pending' AND :decision = 'approved' AND :driver_user_id != :__user_id AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND ((a.status = 'submitted' AND :decision IN ('approved', 'rejected')) OR (a.status = 'approved' AND :decision = 'suspended') OR (a.status = 'suspended' AND :decision = 'approved')) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0) AND a.status = 'submitted')",
+        "UPDATE driver_availability SET available = 0, updated_at = :__now WHERE user_id = :driver_user_id AND :decision IN ('rejected', 'suspended') AND :driver_user_id != :__user_id AND EXISTS (SELECT 1 FROM driver_applications a WHERE a.user_id = :driver_user_id AND a.user_id != :__user_id AND ((a.status = 'submitted' AND :decision IN ('approved', 'rejected')) OR (a.status = 'approved' AND :decision = 'suspended') OR (a.status = 'suspended' AND :decision = 'approved')) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0))",
+        "UPDATE driver_applications SET status = :decision, status_reason = CASE WHEN :decision = 'approved' THEN NULL ELSE trim(:reason) END, reviewed_at = :__now, reviewed_by = :__user_id, updated_at = :__now WHERE user_id = :driver_user_id AND user_id != :__user_id AND ((driver_applications.status = 'submitted' AND :decision IN ('approved', 'rejected')) OR (driver_applications.status = 'approved' AND :decision = 'suspended') OR (driver_applications.status = 'suspended' AND :decision = 'approved')) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0)"
+      ],
+      "params": {
+        "driver_user_id": {
+          "type": "string"
+        },
+        "decision": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "optional": true
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "review_driver_vehicle",
+      "description": "Ops: approve or reject one vehicle (pending -> approved|rejected, approved -> rejected). Rejecting needs a reason and takes the driver off dispatch if it was their active vehicle. Audited.",
+      "operation": "batch",
+      "statements": [
+        "INSERT INTO driver_review_log (id, user_id, vehicle_id, from_status, to_status, reason, actor_id, actor_role, at) SELECT :__uuid, v.user_id, v.id, v.status, :decision, :reason, :__user_id, 'ops', :__now FROM driver_vehicles v WHERE v.user_id = :driver_user_id AND v.user_id != :__user_id AND v.id = :vehicle_id AND ((v.status = 'pending' AND :decision IN ('approved', 'rejected')) OR (v.status = 'approved' AND :decision = 'rejected')) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0)",
+        "UPDATE driver_availability SET available = 0, updated_at = :__now WHERE user_id = :driver_user_id AND vehicle_id = :vehicle_id AND :decision = 'rejected' AND :driver_user_id != :__user_id AND EXISTS (SELECT 1 FROM driver_vehicles v WHERE v.user_id = :driver_user_id AND v.id = :vehicle_id AND v.status IN ('pending', 'approved') AND length(trim(coalesce(:reason, ''))) > 0)",
+        "UPDATE driver_vehicles SET status = :decision, status_reason = CASE WHEN :decision = 'approved' THEN NULL ELSE trim(:reason) END, updated_at = :__now WHERE user_id = :driver_user_id AND user_id != :__user_id AND id = :vehicle_id AND ((status = 'pending' AND :decision IN ('approved', 'rejected')) OR (status = 'approved' AND :decision = 'rejected')) AND (:decision = 'approved' OR length(trim(coalesce(:reason, ''))) > 0)"
+      ],
+      "params": {
+        "driver_user_id": {
+          "type": "string"
+        },
+        "vehicle_id": {
+          "type": "string"
+        },
+        "decision": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "optional": true
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
+    },
+    {
+      "name": "list_dispatchable_drivers",
+      "description": "Ops/dispatch: drivers who are available right now AND still approved, with an approved vehicle and an unexpired licence. Suspension, rejection or licence expiry removes a driver here even if their availability flag is stale.",
+      "operation": "query",
+      "sql": "SELECT d.user_id, a.full_name, v.id AS vehicle_id, v.plate, v.vehicle_class, v.seats FROM driver_availability d JOIN driver_applications a ON a.user_id = d.user_id JOIN driver_vehicles v ON v.user_id = d.user_id AND v.id = d.vehicle_id WHERE d.available = 1 AND a.status = 'approved' AND v.status = 'approved' AND a.licence_expires >= date(:__now / 1000, 'unixepoch') AND :__user_id IS NOT NULL ORDER BY d.updated_at LIMIT :limit",
+      "params": {
+        "limit": {
+          "type": "integer",
+          "default": 100,
+          "max": 200,
+          "optional": true
+        }
+      },
+      "requires_auth": true,
+      "auth": {
+        "required": true,
+        "app_roles": [
+          "ops"
+        ]
+      }
     }
   ]
 }

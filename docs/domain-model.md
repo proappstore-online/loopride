@@ -113,6 +113,51 @@ Route `/account` (linked from Home). Migration `0003_rider_profile` adds
   the on-device rides to the account (KV and DB) with no re-entry. Profile,
   saved places, export and deletion require sign-in.
 
+## Driver onboarding and approval (issue #4)
+
+Migration `0004_driver_onboarding`: `driver_applications`, `driver_vehicles`,
+`driver_review_log` (append-only audit) and `driver_availability`. These are
+keyed by the driver's own PAS user id, not by a rider. Client: `/driver/onboarding`
+(`DriverOnboarding.tsx`), `/ops` (`Ops.tsx`), `web/src/lib/driverOnboarding.ts`.
+
+**Application.** Name, phone, licence number/region/expiry and an eligibility
+confirmation, plus at least one vehicle (plate, make, model, optional year,
+colour, seats). Editable only while `draft` or `rejected`. Licence details are
+private: readable only by the applicant (`get_my_driver_application`) and by `ops`;
+the ops list shows just the last 4 characters of the licence number. Document
+images are not collected; only structured data is stored, and nothing is
+public. Adding image upload later should use private storage.
+
+**Lifecycle.** `draft → submitted` (applicant, needs every field and a vehicle) →
+`approved` or `rejected` (ops; rejected goes back to editable and can be
+resubmitted). `approved → suspended → approved` (ops). Rejecting and suspending
+require a reason; an invalid move or missing reason changes nothing. Approving
+from `submitted` also approves the driver's pending vehicles. Ops cannot review
+their own application.
+
+**Vehicles.** `pending → approved | rejected` (ops, `review_driver_vehicle`).
+Changing any detail of a vehicle sends it back to `pending`, and takes the
+driver off dispatch if it was their active vehicle. Deleting it does the same.
+
+**Audit.** Every submission and decision writes a `driver_review_log` row (from
+and to status, reason, actor id, `applicant` or `ops`, time). Applicants read
+their own trail; ops read any driver's (`list_driver_review_log`).
+
+**Roles.** The ops actions declare `auth.app_roles: ["ops"]`, enforced by the PAS
+action executor before the SQL runs. An app owner must grant it: `app.roles.assign(userId, 'ops')`.
+The role check is only the coarse gate; applicant actions are scoped by `:__user_id`
+in SQL, and the approval state lives in the DB, so no client-side flag can
+grant dispatch.
+
+**Dispatch eligibility.** A driver may be `available` only if their application
+is `approved`, their chosen vehicle is `approved`, and their licence has not
+expired (checked against `:__now`). `set_driver_availability` refuses otherwise;
+going offline always works. `list_dispatchable_drivers` re-checks all of this on
+every read, so suspension, rejection, vehicle rejection or licence expiry removes
+a driver immediately even if their stored flag is stale. Suspension also clears
+the flag, and reinstated drivers must opt in again. Nothing consumes
+`list_dispatchable_drivers` yet; matching riders to drivers is a separate piece.
+
 ## Migrating legacy rides
 
 Existing rides live in localStorage (`loopride.rides.v2`, which already absorbs
