@@ -12,6 +12,8 @@ interface TripMapProps {
   pickup: LatLng | null
   dropoff: LatLng | null
   driver: LatLng | null
+  /** Current road route from the driver to their next stop ([lng, lat]); redrawn as it changes. */
+  approach?: [number, number][]
   /** If present, used as the route line immediately — no fetch needed. */
   routePolyline?: [number, number][]
   /** Called with freshly-fetched polyline so the parent can persist it. */
@@ -65,6 +67,7 @@ export default function TripMap({
   pickup,
   dropoff,
   driver,
+  approach,
   routePolyline,
   onRouteFetched,
 }: TripMapProps) {
@@ -116,6 +119,8 @@ export default function TripMap({
           'line-dasharray': STRAIGHT_LINE_DASH,
         },
       })
+      map.addSource('approach', { type: 'geojson', data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } } })
+      map.addLayer({ id: 'approach', type: 'line', source: 'approach', paint: { 'line-color': '#2f8f57', 'line-width': 5, 'line-opacity': 0.85 } })
     })
 
     return () => {
@@ -208,6 +213,18 @@ export default function TripMap({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng, routePolyline])
+
+  // Live route from the driver to their next stop
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    const apply = () => {
+      const source = map.getSource('approach') as GeoJSONSource | undefined
+      source?.setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: approach ?? [] } })
+    }
+    if (mapLoaded.current) apply()
+    else map.once('load', apply)
+  }, [approach])
 
   // Driver dot
   useEffect(() => {

@@ -1644,3 +1644,173 @@ describe('authoritative trip lifecycle and permissions', () => {
     })
   })
 })
+
+describe('live driver location', () => {
+  let db: Db
+  const NOW = Date.UTC(2026, 5, 1)
+  const SYDNEY = { lat: -33.8688, lng: 151.2093 }
+  const DAY = 24 * 60 * 60_000
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const as = (user: string, name: string, params: Record<string, unknown> = {}, now = NOW) => call(db, name, params, user, now)
+  const makeDriver = (id: string) => {
+    as(id, 'save_driver_application', { full_name: id, phone: '1', licence_number: id, licence_region: 'NSW', licence_expires: '2030-01-01', eligibility_confirmed: 1 })
+    as(id, 'save_driver_vehicle', { vehicle_id: `v-${id}`, plate: id, make: 'T', model: 'C', vehicle_class: 'share' })
+    as(id, 'submit_driver_application')
+    as('ops', 'review_driver_application', { driver_user_id: id, decision: 'approved' })
+    as(id, 'update_driver_location', { ...SYDNEY, service_radius_km: 10 })
+    as(id, 'set_driver_availability', { available: 1, vehicle_id: `v-${id}` })
+  }
+  const matched = (id = 'r1', rider = 'rider-1', driver = 'd1') => {
+    if (!db.prepare('SELECT 1 FROM drivers WHERE user_id = ?').get(driver)) makeDriver(driver)
+    as(rider, 'save_ride', { ...rideToRecords({ id, pickup: 'A', pickupCoord: SYDNEY, dropoff: 'B', dropoffCoord: null, days: [], time: '', driverName: '', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'share', fareCents: 1500 }) })
+    as(rider, 'request_dispatch', { request_id: id })
+    as(rider, 'dispatch_tick', { request_id: id })
+    as(driver, 'accept_offer', { rider_id: rider, request_id: id })
+  }
+  const trip = { rider_id: 'rider-1', trip_id: 'r1:trip' }
+  const publish = (driver = 'd1', at = NOW, extra: Record<string, unknown> = {}, ids = trip) =>
+    as(driver, 'publish_driver_location', { ...ids, lat: -33.86881234, lng: 151.20931234, accuracy_m: 8, speed_mps: 11, ...extra }, at)
+  const stored = () => db.prepare('SELECT lat, lng, accuracy_m, speed_mps, updated_at, driver_id FROM trip_locations').all()
+  const read = (rider = 'rider-1', at = NOW, id = 'r1') => as(rider, 'get_driver_location', { request_id: id }, at) as Record<string, unknown>[]
+  const drive = (to: string, driver = 'd1') => as(driver, 'advance_trip', { ...trip, to_status: to })
+
+  it('accepts updates only from the assigned driver, only after they start driving', () => {
+    matched()
+    publish() // scheduled: the driver has not started driving
+    expect(stored()).toEqual([])
+    drive('en_route')
+    makeDriver('d2')
+    publish('d2'); publish('rider-1'); publish('ops') // another driver, the rider, ops
+    expect(stored()).toEqual([])
+    publish('d1')
+    expect(stored()).toHaveLength(1)
+  })
+
+  it('keeps accepting while arrived and in progress, and rejects other trips and unknown ids', () => {
+    matched(); drive('en_route'); drive('arrived')
+    publish('d1', NOW)
+    as('d1', 'start_trip', trip)
+    publish('d1', NOW + 5000)
+    expect(stored()).toMatchObject([{ updated_at: NOW + 5000 }])
+    publish('d1', NOW + 10_000, {}, { rider_id: 'rider-1', trip_id: 'nope:trip' })
+    publish('d1', NOW + 10_000, {}, { rider_id: 'rider-2', trip_id: 'r1:trip' })
+    expect(stored()).toMatchObject([{ updated_at: NOW + 5000 }])
+  })
+
+  it('throttles to one update per 3 seconds', () => {
+    matched(); drive('en_route')
+    publish('d1', NOW, { lat: -33.8, lng: 151.1 })
+    publish('d1', NOW + 2999, { lat: -33.7, lng: 151.2 })
+    expect(stored()).toMatchObject([{ lat: -33.8, lng: 151.1, updated_at: NOW }])
+    publish('d1', NOW + 3000, { lat: -33.7, lng: 151.2 })
+    expect(stored()).toMatchObject([{ lat: -33.7, lng: 151.2, updated_at: NOW + 3000 }])
+  })
+
+  it('stores only the latest position, rounded to about 11 metres, with no trail', () => {
+    matched(); drive('en_route')
+    for (let i = 0; i < 5; i++) publish('d1', NOW + i * 3000, { lat: -33.86881234 - i * 0.001 })
+    expect(count(db, 'trip_locations')).toBe(1)
+    expect(stored()).toEqual([{ lat: -33.8728, lng: 151.2093, accuracy_m: 8, speed_mps: 11, updated_at: NOW + 12_000, driver_id: 'd1' }])
+  })
+
+  it('drops implausible coordinates, accuracy and speed', () => {
+    matched(); drive('en_route')
+    publish('d1', NOW, { lat: 95 })
+    publish('d1', NOW, { lng: -181 })
+    publish('d1', NOW, { accuracy_m: 501 })
+    publish('d1', NOW, { accuracy_m: -1 })
+    publish('d1', NOW, { speed_mps: 71 })
+    publish('d1', NOW, { speed_mps: -2 })
+    expect(stored()).toEqual([])
+    publish('d1', NOW, { accuracy_m: undefined, speed_mps: undefined }) // both optional
+    expect(stored()).toHaveLength(1)
+  })
+
+  it('only the trip\'s rider can read it, with a server-measured age', () => {
+    matched(); drive('en_route')
+    publish('d1', NOW)
+    expect(read('rider-1', NOW + 7500)).toEqual([{ lat: -33.8688, lng: 151.2093, accuracy_m: 8, speed_mps: 11, age_ms: 7500, trip_status: 'en_route' }])
+    expect(read('rider-2')).toEqual([])
+    expect(read('d1')).toEqual([]) // the driver gets no read path
+    expect(read('ops')).toEqual([])
+    makeDriver('d2')
+    expect(read('d2')).toEqual([])
+  })
+
+  it('is invisible before the driver starts driving, and nothing is shown for another rider\'s id', () => {
+    matched()
+    expect(read()).toEqual([])
+    drive('en_route'); publish('d1', NOW)
+    matched('r2', 'rider-2', 'd3')
+    expect(read('rider-2', NOW, 'r1')).toEqual([]) // r1 belongs to rider-1
+  })
+
+  it.each([
+    ['completion', () => { drive('arrived'); as('d1', 'start_trip', trip); drive('completed') }],
+    ['rider cancellation', () => as('rider-1', 'cancel_ride', { request_id: 'r1' })],
+    ['driver cancellation', () => as('d1', 'driver_cancel_trip', { ...trip, reason_code: 'safety' })],
+    ['rider no-show', () => { drive('arrived'); as('d1', 'report_rider_no_show', trip, NOW + 6 * 60_000) }],
+    ['ops cancellation', () => as('ops', 'ops_cancel_trip', { ...trip, note: 'incident' })],
+  ])('deletes the live location on %s', (_name, end) => {
+    matched(); drive('en_route'); publish('d1', NOW)
+    expect(stored()).toHaveLength(1)
+    end()
+    expect(stored()).toEqual([])
+    expect(read('rider-1', NOW + 1000)).toEqual([])
+    publish('d1', NOW + 10_000) // no longer accepted
+    expect(stored()).toEqual([])
+  })
+
+  it('deletes the live location on a driver no-show report', () => {
+    matched(); drive('en_route'); publish('d1', NOW)
+    as('rider-1', 'report_driver_no_show', { request_id: 'r1' }, NOW + 16 * 60_000)
+    expect(stored()).toEqual([])
+  })
+
+  it('purges positions older than 24 hours whenever anyone publishes', () => {
+    matched(); drive('en_route'); publish('d1', NOW)
+    matched('r2', 'rider-2', 'd2')
+    as('d2', 'advance_trip', { rider_id: 'rider-2', trip_id: 'r2:trip', to_status: 'en_route' })
+    as('d2', 'publish_driver_location', { rider_id: 'rider-2', trip_id: 'r2:trip', lat: -33.8, lng: 151.2 }, NOW + DAY + 1)
+    expect(db.prepare('SELECT trip_id FROM trip_locations').all()).toEqual([{ trip_id: 'r2:trip' }])
+  })
+
+  it('does not disturb other trips when one ends', () => {
+    matched(); drive('en_route'); publish('d1', NOW)
+    matched('r2', 'rider-2', 'd2')
+    as('d2', 'advance_trip', { rider_id: 'rider-2', trip_id: 'r2:trip', to_status: 'en_route' })
+    as('d2', 'publish_driver_location', { rider_id: 'rider-2', trip_id: 'r2:trip', lat: -33.8, lng: 151.2 }, NOW)
+    as('rider-1', 'cancel_ride', { request_id: 'r1' })
+    expect(db.prepare('SELECT trip_id FROM trip_locations').all()).toEqual([{ trip_id: 'r2:trip' }])
+  })
+
+  it('account deletion removes the live location and every later table the rider owns', () => {
+    matched(); drive('en_route'); publish('d1', NOW)
+    as('rider-1', 'cancel_ride', { request_id: 'r1' })
+    publish('d1', NOW + 5000)
+    as('rider-1', 'open_dispute', { ...trip, reason_code: 'other' }, NOW + 6000)
+    as('rider-1', 'delete_my_rider_data')
+    for (const table of ['trips', 'trip_locations', 'trip_lifecycle', 'trip_lifecycle_events', 'trip_disputes', 'dispatch_offers', 'dispatch_requests', 'ride_requests'])
+      expect(count(db, table), table).toBe(0)
+  })
+
+  it('a driver deleting their account erases their licence data, vehicles and location, and clears their live position', () => {
+    matched(); drive('en_route'); publish('d1', NOW)
+    as('d1', 'delete_my_rider_data')
+    for (const table of ['driver_applications', 'driver_vehicles', 'driver_availability', 'driver_locations', 'trip_locations'])
+      expect(count(db, table), table).toBe(0)
+    expect(count(db, 'driver_review_log')).toBeGreaterThan(0) // audit trail is retained
+  })
+
+  it('fare quotes are erased with the account', () => {
+    as('rider-1', 'create_quote', { quote_id: 'q', vehicle_class: 'share', pickup_label: 'A', pickup_lat: SYDNEY.lat, pickup_lng: SYDNEY.lng, dropoff_label: 'B', dropoff_lat: SYDNEY.lat + 0.045, dropoff_lng: SYDNEY.lng, distance_m: 5000, duration_s: 600 })
+    expect(count(db, 'fare_quotes')).toBe(1)
+    as('rider-1', 'delete_my_rider_data')
+    expect(count(db, 'fare_quotes')).toBe(0)
+  })
+})

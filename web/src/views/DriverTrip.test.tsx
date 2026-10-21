@@ -4,9 +4,11 @@ import userEvent from '@testing-library/user-event'
 
 vi.mock('./TripMap', () => ({ default: () => <div data-testid="trip-map" /> }))
 vi.mock('../lib/useWakeLock', () => ({ useWakeLock: () => ({ supported: false, active: false, error: null }) }))
-vi.mock('../lib/transport', () => ({ openTransport: () => ({ kind: 'broadcast', publish: vi.fn(), subscribe: () => () => undefined, close: vi.fn() }) }))
+vi.mock('../lib/tracking', async (importOriginal) => ({ ...(await importOriginal<typeof import('../lib/tracking')>()), publishDriverLocation: (...args: unknown[]) => publishLocation(...args) }))
 
-const { current, api } = vi.hoisted(() => ({
+const { current, api, publishLocation, geo } = vi.hoisted(() => ({
+  publishLocation: vi.fn(async (..._args: unknown[]) => undefined),
+  geo: { watch: vi.fn(), clear: vi.fn() },
   current: { trip: null as Record<string, unknown> | null },
   api: { driverStep: vi.fn(async () => undefined), driverCancel: vi.fn(async () => undefined), reportRiderNoShow: vi.fn(async () => undefined), openDispute: vi.fn(async () => undefined) },
 }))
@@ -25,7 +27,12 @@ const mount = () => render(renderWithRouter(<DriverTrip riderId="rider-1" rideId
 beforeEach(() => {
   current.trip = trip()
   Object.values(api).forEach((f) => f.mockClear())
-  vi.stubGlobal('navigator', {})
+  publishLocation.mockClear()
+  publishLocation.mockResolvedValue(undefined)
+  geo.watch.mockReset()
+  geo.clear.mockReset()
+  geo.watch.mockImplementation((ok: (p: unknown) => void) => { ok({ coords: { latitude: -33.87, longitude: 151.21, accuracy: 7, speed: 9 } }); return 1 })
+  vi.stubGlobal('navigator', { geolocation: { watchPosition: geo.watch, clearWatch: geo.clear } })
 })
 
 describe('DriverTrip', () => {
@@ -93,5 +100,46 @@ describe('DriverTrip', () => {
     current.trip = null
     mount()
     expect(await screen.findByText(/isn't assigned to you/)).toBeInTheDocument()
+  })
+
+  describe('location sharing', () => {
+    it('sends real GPS as authenticated updates while driving to the pickup', async () => {
+      current.trip = trip({ phase: 'en_route' })
+      mount()
+      await waitFor(() => expect(publishLocation).toHaveBeenCalledWith('rider-1', 'r1:trip', { position: { lat: -33.87, lng: 151.21 }, accuracyM: 7, speedMps: 9 }))
+      expect(await screen.findByText(/Sharing your live location with the rider until the trip ends/)).toBeInTheDocument()
+    })
+
+    it.each(['arrived', 'in_progress'])('keeps sharing while %s', async (phase) => {
+      current.trip = trip({ phase })
+      mount()
+      await waitFor(() => expect(publishLocation).toHaveBeenCalled())
+    })
+
+    it.each(['scheduled', 'completed', 'cancelled'])('shares nothing while %s', async (phase) => {
+      current.trip = trip({ phase })
+      mount()
+      await screen.findByText('Central → Airport')
+      await new Promise((r) => setTimeout(r, 30))
+      expect(geo.watch).not.toHaveBeenCalled()
+      expect(publishLocation).not.toHaveBeenCalled()
+      expect(screen.queryByText(/Sharing your live location/)).not.toBeInTheDocument()
+    })
+
+    it('stops watching the GPS when the screen goes away', async () => {
+      current.trip = trip({ phase: 'en_route' })
+      const view = mount()
+      await waitFor(() => expect(publishLocation).toHaveBeenCalled())
+      view.unmount()
+      expect(geo.clear).toHaveBeenCalled()
+    })
+
+    it('tells the driver when location is blocked, since the rider cannot see them', async () => {
+      geo.watch.mockImplementation((_ok: unknown, fail: (e: { message: string }) => void) => { fail({ message: 'User denied Geolocation' }); return 1 })
+      current.trip = trip({ phase: 'en_route' })
+      mount()
+      expect(await screen.findByText(/User denied Geolocation. The rider can't see you/)).toBeInTheDocument()
+      expect(publishLocation).not.toHaveBeenCalled()
+    })
   })
 })

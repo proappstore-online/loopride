@@ -315,10 +315,61 @@ share-link driver import are gone. Signed-out riders can no longer "ride now"
 (they are asked to sign in); reservations and routines still work signed out.
 The driver trip screen publishes real GPS only.
 
-**Known gaps.** Live position pings still travel over the unauthenticated per-ride
-PAS room, so anyone who knows a ride id could spoof them; they do not affect
-trip state. Fees are recorded but never charged. Ops UI for cancel/dispute
-actions is not built (the actions exist and are role-gated).
+**Known gaps.** Fees are recorded but never charged. Ops UI for cancel/dispute
+actions is not built (the actions exist and are role-gated). Live position is
+covered under *Live tracking* below.
+
+## Live tracking, ETA and location privacy (issue #8)
+
+Migration `0008_trip_locations`: `trip_locations`, one row per trip holding only
+the driver's latest position. Client: `web/src/lib/tracking.ts`, `lib/eta.ts`,
+`views/Trip.tsx`, `views/DriverTrip.tsx`, `views/TripMap.tsx`. The old
+per-ride PAS room and BroadcastChannel transport (unauthenticated, same-browser
+or spoofable) is removed; everything goes through authenticated actions.
+
+**Who may send, and when.** `publish_driver_location` accepts a position only
+from the driver assigned to the trip, and only while the trip is `en_route` or
+`arrived` (which includes in progress). Nothing is accepted while the trip is
+`scheduled` (the driver has not started driving) or once it is finished. Other
+drivers, the rider and ops are refused. Updates closer than 3 seconds apart are
+dropped by the server; the app sends at most one every 4 seconds, always the
+newest fix, never a backlog, and warns the driver after 3 failed sends in a row
+or when location permission is blocked.
+
+**Plausibility.** Out-of-range coordinates, accuracy worse than 500 m, and
+negative or over-70 m/s speeds are dropped.
+
+**Who may see it.** `get_driver_location` returns a row only to the rider who
+owns the ride, only while the trip is `en_route`/`arrived`. The driver, other
+riders and ops have no read path. The rider's screen only requests it in those
+phases.
+
+**Precision and retention.** Coordinates are rounded to 4 decimals (about
+11 m) before they are stored. Only the latest position is kept, overwritten in
+place; there is no trail or history. It is deleted the moment the trip ends by
+completion, rider or driver cancellation, either no-show, or ops cancellation,
+and every publish also purges any position older than 24 hours as a backstop.
+Account deletion removes it, and a driver's own location data too.
+
+**Cross-device and freshness.** The rider polls every 4 seconds, so it works on
+any device. Freshness is the age of the last accepted update, measured by the
+server clock when it answered and then aged locally: live (15 s or less),
+delayed (up to 60 s), stale (up to 5 min, "last seen N min ago"), offline
+(beyond that, the driver is removed from the map). The last known position is
+kept on the map while stale.
+
+**ETA.** Recalculated from the driver's current position with the platform
+routing service, to the pickup until the rider is on board and to the drop-off
+afterwards, and shown only for live or delayed locations. It is refreshed when
+the driver moves 150 m or after 30 seconds. If routing is unavailable a
+straight-line estimate (about 25 km/h) is shown and labelled approximate. For
+stale or offline locations it says the ETA is paused instead of guessing. The
+road route from the driver to the next stop is drawn on the map.
+
+**Known gaps.** Polling is not push, so updates can lag by up to a few seconds.
+Positions are not map-matched. The data export (#3) does not yet include trip
+lifecycle, dispute or live-location data. Driver review-log rows are kept when a
+driver deletes their account, for audit.
 
 ## Migrating legacy rides
 

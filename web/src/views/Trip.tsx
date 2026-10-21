@@ -1,10 +1,10 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
 import type { LatLng, RecurringRide } from '../types'
 import { DAYS } from '../types'
 import { getRide, saveRide } from '../storage'
-import { openTransport, type DriverPing, type TransportKind } from '../lib/transport'
-import { LIVE_FEED_TIMEOUT_MS } from '../lib/constants'
+import { ageNow, trackDriver, type DriverLocation } from '../lib/tracking'
+import { computeEta, etaTarget, etaTrusted, formatEta, freshness, shouldRecompute, type Eta } from '../lib/eta'
 import { runDispatch, startDispatch, type DispatchStatus } from '../lib/dispatch'
 import {
   OUTCOME_TEXT,
@@ -41,8 +41,9 @@ const POLL_MS = 5000
 export default function Trip({ rideId }: TripProps) {
   const [, setLocation] = useLocation()
   const [ride, setRide] = useState<RecurringRide | undefined>(undefined)
-  const [lastPing, setLastPing] = useState<DriverPing | null>(null)
-  const [transportKind, setTransportKind] = useState<TransportKind | null>(null)
+  const [loc, setLoc] = useState<DriverLocation | null>(null)
+  const [eta, setEta] = useState<Eta | null>(null)
+  const lastEta = useRef<{ from: { lat: number; lng: number }; target: { lat: number; lng: number }; at: number } | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [dispatch, setDispatch] = useState<DispatchStatus | null>(null)
   const [trip, setTrip] = useState<TripState | null>(null)
@@ -52,16 +53,6 @@ export default function Trip({ rideId }: TripProps) {
 
   useEffect(() => {
     setRide(getRide(rideId))
-  }, [rideId])
-
-  useEffect(() => {
-    const transport = openTransport(rideId)
-    setTransportKind(transport.kind)
-    const unsub = transport.subscribe(setLastPing)
-    return () => {
-      unsub()
-      transport.close()
-    }
   }, [rideId])
 
   useEffect(() => {
@@ -89,10 +80,51 @@ export default function Trip({ rideId }: TripProps) {
     }
   }, [managed, rideId, searchRun, refreshTrip])
 
-  const liveFeed = lastPing !== null && now - lastPing.at < LIVE_FEED_TIMEOUT_MS
   const phase = trip?.phase ?? null
+  const tracking = managed && (phase === 'en_route' || phase === 'arrived' || phase === 'in_progress')
 
-  const driverPosition = useMemo<LatLng | null>(() => (lastPing && phase && !isFinished(phase) ? lastPing.position : null), [lastPing, phase])
+  // Live location comes from authenticated server polling, so it works across devices.
+  useEffect(() => {
+    if (!tracking) {
+      setLoc(null)
+      return
+    }
+    const controller = new AbortController()
+    void trackDriver(rideId, { signal: controller.signal, onUpdate: setLoc })
+    return () => controller.abort()
+  }, [tracking, rideId])
+
+  const age = loc ? ageNow(loc, now) : null
+  const fresh = age === null ? null : freshness(age)
+  const trusted = fresh !== null && etaTrusted(fresh)
+  const target = phase ? etaTarget(phase, ride?.pickupCoord ?? null, ride?.dropoffCoord ?? null) : null
+
+  // ETA from the driver's current position along current route data, refreshed as they move.
+  const here = loc?.position
+  const tick = Math.floor(now / 10_000)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+    }
+  }, [])
+  useEffect(() => {
+    if (!trusted || !here || !target) return
+    if (!shouldRecompute(lastEta.current, here, target, Date.now())) return
+    lastEta.current = { from: here, target, at: Date.now() }
+    // Not cancelled when the next poll lands: the answer is still the newest one asked for.
+    computeEta(here, target).then((e) => alive.current && setEta(e), () => undefined)
+  }, [trusted, here, target, tick])
+
+  useEffect(() => {
+    if (!tracking) {
+      setEta(null)
+      lastEta.current = null
+    }
+  }, [tracking])
+
+  const driverPosition = useMemo<LatLng | null>(() => (loc && fresh !== 'offline' ? loc.position : null), [loc, fresh])
 
   if (!ride) {
     return (
@@ -104,7 +136,7 @@ export default function Trip({ rideId }: TripProps) {
   }
 
   const driverLabel = dispatch?.driverName || 'Your driver'
-  const lastPingAge = lastPing ? Math.round((now - lastPing.at) / 1000) : null
+  const ageSec = age === null ? null : Math.round(age / 1000)
   const searching = managed && !trip && (dispatch === null || dispatch.state === 'searching')
   const cancellable = managed && ((trip && canRiderCancel(trip.phase)) || searching)
 
@@ -138,7 +170,7 @@ export default function Trip({ rideId }: TripProps) {
 
       <section className="mb-4">
         <Suspense fallback={<div className="flex h-72 items-center justify-center rounded-3xl border border-[var(--line)] bg-[var(--accent-soft)] text-xs text-[var(--muted)]">Loading map…</div>}>
-          <TripMap pickup={ride.pickupCoord} dropoff={ride.dropoffCoord} driver={driverPosition} routePolyline={ride.routePolyline} onRouteFetched={(coords) => saveRide({ ...ride, routePolyline: coords })} />
+          <TripMap pickup={ride.pickupCoord} dropoff={ride.dropoffCoord} driver={driverPosition} approach={trusted && eta?.polyline ? eta.polyline : undefined} routePolyline={ride.routePolyline} onRouteFetched={(coords) => saveRide({ ...ride, routePolyline: coords })} />
         </Suspense>
       </section>
 
@@ -162,15 +194,14 @@ export default function Trip({ rideId }: TripProps) {
       <section className="mt-4 rounded-3xl border border-[var(--line)] p-6">
         <div className="flex items-baseline justify-between">
           <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Status</p>
-          {managed && (liveFeed ? (
-            <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--success)]"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--success)]" />Live · {lastPingAge}s ago</span>
-          ) : lastPing ? (
-            <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--error)]" title="Live feed has gone quiet. Showing last known driver position."><span className="h-1.5 w-1.5 rounded-full bg-[var(--error)]" />Last seen {lastPingAge}s ago</span>
-          ) : (
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">No live feed</span>
-          ))}
+          {tracking && <FreshnessBadge state={fresh} ageSec={ageSec} />}
         </div>
         <p className="mt-1 display-font text-2xl font-semibold text-[var(--ink)]">{headline}</p>
+        {tracking && phase !== 'arrived' && (
+          <p role="status" aria-label="ETA" className="mt-2 text-sm font-semibold text-[var(--ink)]">
+            {!loc ? 'Waiting for your driver’s location…' : !trusted ? 'ETA paused: the driver’s location is out of date.' : eta ? `${eta.approximate ? 'About ' : ''}${formatEta(eta.seconds)}${phase === 'in_progress' ? ' to your destination' : ' until pickup'}${eta.approximate ? ' (approximate)' : ''}` : 'Calculating ETA…'}
+          </p>
+        )}
         {trip && trip.phase === 'cancelled' && (
           <p className="mt-2 text-sm text-[var(--muted)]">
             {trip.cancelFeeCents > 0 ? `Cancellation fee: ${usd(trip.cancelFeeCents)}` : 'No cancellation fee.'}
@@ -224,11 +255,7 @@ export default function Trip({ rideId }: TripProps) {
         )}
       </section>
 
-      {managed && (
-        <p className="mt-6 text-center text-xs text-[var(--muted)]">
-          {transportKind === 'rooms' ? 'Live tracking is cross-device via FAS rooms.' : 'Live tracking is same-browser only. Sign in to enable cross-device.'}
-        </p>
-      )}
+      {managed && <p className="mt-6 text-center text-xs text-[var(--muted)]">Your driver's location is shared only while they are on the way or driving you, and is deleted when the trip ends.</p>}
     </div>
   )
 }
@@ -300,4 +327,12 @@ function DisputePanel({ tripId, onClose, onDone }: { tripId: string; onClose: ()
       </div>
     </div>
   )
+}
+
+function FreshnessBadge({ state, ageSec }: { state: ReturnType<typeof freshness> | null; ageSec: number | null }) {
+  if (state === 'live') return <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--success)]"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--success)]" />Live · {ageSec}s ago</span>
+  if (state === 'delayed') return <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]"><span className="h-1.5 w-1.5 rounded-full bg-[var(--muted)]" />Delayed · {ageSec}s ago</span>
+  if (state === 'stale') return <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--error)]" title="Showing the last known driver position."><span className="h-1.5 w-1.5 rounded-full bg-[var(--error)]" />Last seen {Math.max(1, Math.round((ageSec ?? 0) / 60))} min ago</span>
+  if (state === 'offline') return <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--error)]"><span className="h-1.5 w-1.5 rounded-full bg-[var(--error)]" />Driver offline</span>
+  return <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">No live location yet</span>
 }

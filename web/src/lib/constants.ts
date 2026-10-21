@@ -14,9 +14,6 @@ export const KV_KEYS = {
   rides: 'rides.v1',
 } as const
 
-/** BroadcastChannel name for cross-tab driver→rider position pings. */
-export const BROADCAST_CHANNEL = 'loopride.driver-position.v1'
-
 /** URL hash prefixes. */
 export const HASH = {
   ride: '#ride=',
@@ -35,6 +32,3 @@ export const LIMITS = {
   dropoffChars: 200,
   driverNameChars: 80,
 } as const
-
-/** Driver position freshness window. After this the UI flips to "Last seen". */
-export const LIVE_FEED_TIMEOUT_MS = 15_000

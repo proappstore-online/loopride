@@ -16,6 +16,20 @@ const { dispatchState, tripState, api } = vi.hoisted(() => ({
   },
 }))
 
+const { track, route } = vi.hoisted(() => ({
+  track: { loc: null as null | { position: { lat: number; lng: number }; accuracyM: number | null; speedMps: number | null; tripStatus: string; ageMs: number; receivedAt: number }, calls: 0 },
+  route: { fn: vi.fn() },
+}))
+vi.mock('../lib/tracking', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/tracking')>()),
+  trackDriver: vi.fn(async (_id: string, o: { signal: AbortSignal; onUpdate: (l: unknown) => void }) => {
+    track.calls += 1
+    o.onUpdate(track.loc)
+    await new Promise<void>((resolve) => o.signal.addEventListener('abort', () => resolve()))
+  }),
+}))
+vi.mock('../lib/routing', () => ({ fetchRoute: (...args: unknown[]) => route.fn(...args) }))
+
 vi.mock('../lib/dispatch', () => ({
   runDispatch: vi.fn(async (_id: string, o: { onUpdate: (s: unknown) => void }) => {
     o.onUpdate(dispatchState.current)
@@ -35,19 +49,21 @@ vi.mock('../lib/tripLifecycle', async (importOriginal) => ({
 
 import Trip from './Trip'
 import { saveRide } from '../storage'
-import { publish } from '../lib/channel'
 import type { RecurringRide } from '../types'
 import { renderWithRouter } from '../../test/router'
 
 const legacy: RecurringRide = { id: 'ride-old', pickup: 'A', pickupCoord: { lat: 0, lng: 0 }, dropoff: 'B', dropoffCoord: { lat: 1, lng: 1 }, days: [], time: '08:00', driverName: 'Jordan', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'comfort', fareCents: 1711, etaMinutes: 5, driverPlate: 'RS-482', driverRating: 4.9 }
 const live: RecurringRide = { ...legacy, id: 'ride-live', driverName: '', driverPlate: undefined, driverRating: undefined, quoteId: 'q1' }
-const tick = () => new Promise((resolve) => setTimeout(resolve, 30))
 const mount = (id: string) => render(renderWithRouter(<Trip rideId={id} />).ui)
 
 const lifecycle = (extra: Record<string, unknown> = {}) => ({ tripId: 'ride-live:trip', requestId: 'ride-live', phase: 'scheduled', startedAt: null, endedAt: null, outcome: null, cancelledByRole: null, cancelCode: null, cancelFeeCents: 0, feePolicy: null, assignedAt: Date.now(), arrivedAt: null, disputed: false, pickup: null, dropoff: null, ...extra })
 const matchedDispatch = { state: 'matched', attempts: 1, offerStatus: 'accepted', driverName: 'Dana', plate: 'RS-9' }
 
 beforeEach(() => {
+  track.loc = null
+  track.calls = 0
+  route.fn.mockReset()
+  route.fn.mockResolvedValue({ coordinates: [[1, 1], [0.5, 0.5]], distanceMeters: 2400, durationSeconds: 400 })
   dispatchState.current = { state: 'searching', attempts: 0, offerStatus: null, driverName: null, plate: null }
   tripState.current = null
   Object.values(api).forEach((f) => f.mockClear())
@@ -188,16 +204,101 @@ describe('Trip: server-driven rides', () => {
     expect(screen.queryByRole('button', { name: 'Report a problem' })).not.toBeInTheDocument()
   })
 
-  it('follows a real live location ping from the driver, and keeps the last position when it goes stale', async () => {
+  const located = (ageMs: number, extra = {}) => ({ position: { lat: 0.5, lng: 0.5 }, accuracyM: 5, speedMps: 10, tripStatus: 'en_route', ageMs, receivedAt: Date.now(), ...extra })
+
+  it('shows a live driver position and a route-based ETA to the pickup', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'en_route' })
+    track.loc = located(2000)
+    mount('ride-live')
+    expect(await screen.findByText(/Live · \d+s ago/)).toBeInTheDocument()
+    expect(screen.getByTestId('trip-map').dataset.driver).toBe('0.5,0.5')
+    expect(await screen.findByText('7 min until pickup')).toBeInTheDocument()
+    expect(route.fn).toHaveBeenCalledWith({ lat: 0.5, lng: 0.5 }, { lat: 0, lng: 0 }, undefined)
+  })
+
+  it('ETA heads to the destination once the trip is in progress', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'in_progress' })
+    track.loc = located(2000, { tripStatus: 'arrived' })
+    mount('ride-live')
+    expect(await screen.findByText('7 min to your destination')).toBeInTheDocument()
+    expect(route.fn).toHaveBeenCalledWith({ lat: 0.5, lng: 0.5 }, { lat: 1, lng: 1 }, undefined)
+  })
+
+  it('falls back to a labelled straight-line ETA when routing is unavailable', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'en_route' })
+    track.loc = located(1000)
+    route.fn.mockRejectedValue(new Error('down'))
+    mount('ride-live')
+    expect(await screen.findByText(/About .* until pickup \(approximate\)/)).toBeInTheDocument()
+  })
+
+  it('marks a delayed feed and still shows the ETA', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'en_route' })
+    track.loc = located(40_000)
+    mount('ride-live')
+    expect(await screen.findByText(/Delayed · \d+s ago/)).toBeInTheDocument()
+    expect(await screen.findByText('7 min until pickup')).toBeInTheDocument()
+  })
+
+  it('does not derive an ETA from a stale location, and says so', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'en_route' })
+    track.loc = located(3 * 60_000)
+    mount('ride-live')
+    expect(await screen.findByText(/Last seen 3 min ago/)).toBeInTheDocument()
+    expect(screen.getByText(/ETA paused/)).toBeInTheDocument()
+    expect(screen.getByTestId('trip-map').dataset.driver).toBe('0.5,0.5') // last known position stays on the map
+    expect(route.fn).not.toHaveBeenCalled()
+  })
+
+  it('shows the driver as offline after five minutes and removes them from the map', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'en_route' })
+    track.loc = located(6 * 60_000)
+    mount('ride-live')
+    expect(await screen.findByText('Driver offline')).toBeInTheDocument()
+    expect(screen.getByTestId('trip-map').dataset.driver).toBe('none')
+    expect(route.fn).not.toHaveBeenCalled()
+  })
+
+  it('says it is waiting when the driver has not shared a location yet', async () => {
     dispatchState.current = matchedDispatch
     tripState.current = lifecycle({ phase: 'en_route' })
     mount('ride-live')
-    await screen.findByText('Dana is on the way')
-    await act(async () => { publish({ rideId: 'ride-live', position: { lat: 0.5, lng: 0.5 }, speedMps: 10, accuracyM: 5, status: 'en-route', at: Date.now() }); await tick() })
-    expect(screen.getByText(/Live ·/)).toBeInTheDocument()
-    expect(screen.getByTestId('trip-map').dataset.driver).toBe('0.5,0.5')
-    await act(async () => { publish({ rideId: 'ride-live', position: { lat: 0.7, lng: 0.7 }, speedMps: 10, accuracyM: 5, status: 'en-route', at: Date.now() - 60_000 }); await tick() })
-    expect(screen.getByText(/Last seen/)).toBeInTheDocument()
-    expect(screen.getByTestId('trip-map').dataset.driver).toBe('0.7,0.7')
+    expect(await screen.findByText('No live location yet')).toBeInTheDocument()
+    expect(screen.getByText(/Waiting for your driver/)).toBeInTheDocument()
+  })
+
+  it('does not track before the driver starts driving, once they have arrived, or after the trip ends', async () => {
+    dispatchState.current = matchedDispatch
+    for (const phase of ['scheduled', 'completed', 'cancelled']) {
+      track.calls = 0
+      tripState.current = lifecycle({ phase })
+      const { unmount } = mount('ride-live')
+      await screen.findByText(/accepted|completed|cancelled|Trip completed|Cancelled|You cancelled/i).catch(() => undefined)
+      await new Promise((r) => setTimeout(r, 30))
+      expect(track.calls, phase).toBe(0)
+      unmount()
+    }
+  })
+
+  it('does not show an ETA once the driver has arrived', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'arrived' })
+    track.loc = located(1000, { tripStatus: 'arrived' })
+    mount('ride-live')
+    await screen.findByText('Dana has arrived')
+    expect(screen.queryByRole('status', { name: 'ETA' })).not.toBeInTheDocument()
+  })
+
+  it('explains what is shared and when it is deleted', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'en_route' })
+    mount('ride-live')
+    expect(await screen.findByText(/shared only while they are on the way or driving you, and is deleted when the trip ends/)).toBeInTheDocument()
   })
 })

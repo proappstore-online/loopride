@@ -1,8 +1,8 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { useLocation } from 'wouter'
 import type { LatLng } from '../types'
 import { useWakeLock } from '../lib/useWakeLock'
-import { openTransport, type Transport } from '../lib/transport'
+import { LocationPublisher, publishDriverLocation, type PublishHealth } from '../lib/tracking'
 import { showToast } from '../lib/toast'
 import {
   DRIVER_CANCEL_REASONS,
@@ -45,7 +45,7 @@ export default function DriverTrip({ riderId, rideId }: Props) {
   const [now, setNow] = useState(() => Date.now())
   const [position, setPosition] = useState<LatLng | null>(null)
   const [geoError, setGeoError] = useState<string | null>(null)
-  const transportRef = useRef<Transport | null>(null)
+  const [health, setHealth] = useState<PublishHealth>('waiting')
 
   const refresh = useCallback(() => loadDriverTrip(riderId, tripId).then(setTrip, () => setTrip((t) => t ?? null)), [riderId, tripId])
   useEffect(() => {
@@ -62,31 +62,31 @@ export default function DriverTrip({ riderId, rideId }: Props) {
   const driving = phase === 'en_route' || phase === 'arrived' || phase === 'in_progress'
   useWakeLock(driving)
 
-  // Real GPS only: publish the driver's actual position to the rider while the trip is live.
+  // Real GPS only, sent as authenticated, throttled updates, and only while the trip is
+  // in a phase where the server will accept them. Sharing stops the moment the trip ends.
   useEffect(() => {
     if (!driving) return
-    const transport = openTransport(rideId)
-    transportRef.current = transport
     if (!('geolocation' in navigator)) {
       setGeoError('Location is not available on this device')
-      return () => transport.close()
+      return
     }
+    const publisher = new LocationPublisher((fix) => publishDriverLocation(riderId, tripId, fix), setHealth)
     const watch = navigator.geolocation.watchPosition(
       (pos) => {
         const here = { lat: pos.coords.latitude, lng: pos.coords.longitude }
         setPosition(here)
         setGeoError(null)
-        transport.publish({ rideId, position: here, speedMps: pos.coords.speed, accuracyM: pos.coords.accuracy, status: phase === 'arrived' ? 'arrived' : 'en-route', at: Date.now() })
+        publisher.push({ position: here, accuracyM: pos.coords.accuracy ?? null, speedMps: pos.coords.speed ?? null })
       },
       (err) => setGeoError(err.message),
       { enableHighAccuracy: true, maximumAge: 1000, timeout: 10_000 },
     )
     return () => {
       navigator.geolocation.clearWatch(watch)
-      transport.close()
-      transportRef.current = null
+      publisher.stop()
+      setHealth('waiting')
     }
-  }, [driving, rideId, phase])
+  }, [driving, riderId, tripId])
 
   const act = async (run: () => Promise<unknown>, failure: string) => {
     setBusy(true)
@@ -129,7 +129,17 @@ export default function DriverTrip({ riderId, rideId }: Props) {
       <section className="rounded-3xl border border-[var(--line)] p-6">
         <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Trip</p>
         <p className="mt-1 text-sm font-semibold text-[var(--ink)]">{trip.pickup} → {trip.dropoff}</p>
-        {driving && <p className="mt-2 text-xs text-[var(--muted)]">{geoError ? `Location: ${geoError}` : position ? 'Sharing your live location with the rider' : 'Waiting for a location fix…'}</p>}
+        {driving && (
+          <p role="status" className={`mt-2 text-xs ${health === 'failing' || geoError ? 'font-semibold text-[var(--error)]' : 'text-[var(--muted)]'}`}>
+            {geoError
+              ? `Location: ${geoError}. The rider can't see you.`
+              : health === 'failing'
+                ? "Your location isn't reaching the rider. Check your connection."
+                : position
+                  ? 'Sharing your live location with the rider until the trip ends'
+                  : 'Waiting for a location fix…'}
+          </p>
+        )}
       </section>
 
       <section className="mt-4 rounded-3xl border border-[var(--line)] p-6">

@@ -126,7 +126,7 @@
     },
     {
       "name": "cancel_ride",
-      "description": "Rider: cancel one of the caller's ride requests. A matched trip is cancelled with a recorded reason (changed_plans, wait_too_long, wrong_pickup, found_other, other) and a fee under the cancellation policy: free before a driver is assigned and within 2 minutes of assignment, 5.00 later (capped at the fare), 8.00 once the driver has arrived. A trip that has started or finished cannot be cancelled by the rider; completed history is never rewritten. Withdraws any dispatch offer.",
+      "description": "Rider: cancel one of the caller's ride requests. A matched trip is cancelled with a recorded reason (changed_plans, wait_too_long, wrong_pickup, found_other, other) and a fee under the cancellation policy: free before a driver is assigned and within 2 minutes of assignment, 5.00 later (capped at the fare), 8.00 once the driver has arrived. A trip that has started or finished cannot be cancelled by the rider; completed history is never rewritten. Withdraws any dispatch offer. Deletes the trip's live location.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL",
@@ -137,6 +137,7 @@
         "UPDATE ride_requests SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = ride_requests.rider_id AND t.request_id = ride_requests.id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE status IN ('offered', 'accepted') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_offers.rider_id AND t.request_id = dispatch_offers.request_id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE status IN ('searching', 'matched') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_requests.rider_id AND t.request_id = dispatch_requests.request_id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
+        "DELETE FROM trip_locations WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE rider_id = :__user_id AND request_id = :request_id AND status IN ('offered', 'accepted') AND NOT EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND (t.status = 'completed' OR (t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)))",
         "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE rider_id = :__user_id AND request_id = :request_id AND status IN ('searching', 'matched') AND NOT EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND (t.status = 'completed' OR (t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)))",
@@ -174,7 +175,7 @@
     },
     {
       "name": "advance_trip",
-      "description": "Driver: move the assigned trip one step: scheduled -> en_route -> arrived, and arrived -> completed only after start_trip. Cancelling is a separate action (driver_cancel_trip). Invalid transitions, repeated requests, unassigned trips and other drivers' trips change nothing and write no audit row. Completing releases the driver's dispatch lock and completes the ride request.",
+      "description": "Driver: move the assigned trip one step: scheduled -> en_route -> arrived, and arrived -> completed only after start_trip. Cancelling is a separate action (driver_cancel_trip). Invalid transitions, repeated requests, unassigned trips and other drivers' trips change nothing and write no audit row. Completing releases the driver's dispatch lock and completes the ride request. Completing deletes the trip's live location.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL))",
@@ -184,6 +185,7 @@
         "UPDATE trip_lifecycle SET outcome = 'completed', ended_at = :__now, updated_at = :__now WHERE :to_status = 'completed' AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_lifecycle.rider_id AND t.id = trip_lifecycle.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)))",
         "UPDATE ride_requests SET status = 'completed', updated_at = :__now WHERE :to_status = 'completed' AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = ride_requests.rider_id AND t.request_id = ride_requests.id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)))",
         "UPDATE dispatch_offers SET status = 'completed', responded_at = :__now WHERE status = 'accepted' AND :to_status = 'completed' AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_offers.rider_id AND t.request_id = dispatch_offers.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)))",
+        "DELETE FROM trip_locations WHERE :to_status = 'completed' AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)))",
         "UPDATE trips SET status = :to_status, updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND ((t.status = 'scheduled' AND :to_status = 'en_route') OR (t.status = 'en_route' AND :to_status = 'arrived') OR (t.status = 'arrived' AND :to_status = 'completed' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NOT NULL)))"
       ],
       "params": {
@@ -416,9 +418,21 @@
     },
     {
       "name": "delete_my_rider_data",
-      "description": "Erase everything the caller owns as a rider (profile, saved places, requests, quotes, assignments, trips, history, drivers and vehicles they recorded) and unlink the caller's driver account. Irreversible.",
+      "description": "Erase everything the caller owns as a rider (profile, saved places, requests, quotes, assignments, trips, history, drivers and vehicles they recorded) and unlink the caller's driver account. Irreversible. Also erases the caller's fare quotes, dispatch records, trip lifecycle, events and disputes, live locations, and their own driver application (licence data), vehicles, availability and location. Driver review-log rows are kept for audit.",
       "operation": "batch",
       "statements": [
+        "DELETE FROM trip_locations WHERE rider_id = :__user_id",
+        "DELETE FROM trip_lifecycle_events WHERE rider_id = :__user_id",
+        "DELETE FROM trip_lifecycle WHERE rider_id = :__user_id",
+        "DELETE FROM trip_disputes WHERE rider_id = :__user_id",
+        "DELETE FROM dispatch_offers WHERE rider_id = :__user_id",
+        "DELETE FROM dispatch_requests WHERE rider_id = :__user_id",
+        "DELETE FROM fare_quotes WHERE rider_id = :__user_id",
+        "DELETE FROM trip_locations WHERE driver_id = :__user_id",
+        "DELETE FROM driver_locations WHERE user_id = :__user_id",
+        "DELETE FROM driver_availability WHERE user_id = :__user_id",
+        "DELETE FROM driver_vehicles WHERE user_id = :__user_id",
+        "DELETE FROM driver_applications WHERE user_id = :__user_id",
         "DELETE FROM trip_transitions WHERE rider_id = :__user_id",
         "DELETE FROM trip_events WHERE rider_id = :__user_id",
         "DELETE FROM trips WHERE rider_id = :__user_id",
@@ -983,7 +997,7 @@
     },
     {
       "name": "driver_cancel_trip",
-      "description": "Driver: cancel the assigned trip before it starts, with a reason (rider_unreachable, vehicle_issue, safety, too_far, other). No fee to the rider; recorded as driver_cancelled for reliability review. Frees the driver's lock and cancels the ride request.",
+      "description": "Driver: cancel the assigned trip before it starts, with a reason (rider_unreachable, vehicle_issue, safety, too_far, other). No fee to the rider; recorded as driver_cancelled for reliability review. Frees the driver's lock and cancels the ride request. Deletes the trip's live location.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL",
@@ -994,6 +1008,7 @@
         "UPDATE ride_requests SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = ride_requests.rider_id AND t.request_id = ride_requests.id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE status IN ('offered', 'accepted') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_offers.rider_id AND t.request_id = dispatch_offers.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE status IN ('searching', 'matched') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_requests.rider_id AND t.request_id = dispatch_requests.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
+        "DELETE FROM trip_locations WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)",
         "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL)"
       ],
       "params": {
@@ -1015,7 +1030,7 @@
     },
     {
       "name": "report_rider_no_show",
-      "description": "Driver: the rider did not show. Allowed only once the driver has been at the pickup for 5 minutes and the trip has not started. Cancels the trip as rider_no_show and records the no-show fee (8.00, capped at the fare).",
+      "description": "Driver: the rider did not show. Allowed only once the driver has been at the pickup for 5 minutes and the trip has not started. Cancels the trip as rider_no_show and records the no-show fee (8.00, capped at the fare). Deletes the trip's live location.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000",
@@ -1026,6 +1041,7 @@
         "UPDATE ride_requests SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = ride_requests.rider_id AND t.request_id = ride_requests.id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000)",
         "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE status IN ('offered', 'accepted') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_offers.rider_id AND t.request_id = dispatch_offers.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000)",
         "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE status IN ('searching', 'matched') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_requests.rider_id AND t.request_id = dispatch_requests.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000)",
+        "DELETE FROM trip_locations WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000)",
         "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :rider_id AND t.id = :trip_id AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status = 'arrived' AND (SELECT l.started_at FROM trip_lifecycle l WHERE l.rider_id = t.rider_id AND l.trip_id = t.id) IS NULL AND :__now - (SELECT MAX(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id AND x.to_status = 'arrived') >= 300000)"
       ],
       "params": {
@@ -1044,7 +1060,7 @@
     },
     {
       "name": "report_driver_no_show",
-      "description": "Rider: the driver never arrived. Allowed only 15 minutes after assignment while the driver has not arrived. Cancels the trip as driver_no_show with no fee to the rider; the rider can request a new ride.",
+      "description": "Rider: the driver never arrived. Allowed only 15 minutes after assignment while the driver has not arrived. Cancels the trip as driver_no_show with no fee to the rider; the rider can request a new ride. Deletes the trip's live location.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000",
@@ -1055,6 +1071,7 @@
         "UPDATE ride_requests SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = ride_requests.rider_id AND t.request_id = ride_requests.id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000)",
         "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE status IN ('offered', 'accepted') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_offers.rider_id AND t.request_id = dispatch_offers.request_id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000)",
         "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE status IN ('searching', 'matched') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_requests.rider_id AND t.request_id = dispatch_requests.request_id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000)",
+        "DELETE FROM trip_locations WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000)",
         "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('scheduled', 'en_route') AND :__now - (SELECT MIN(x.at) FROM trip_transitions x WHERE x.rider_id = t.rider_id AND x.trip_id = t.id) >= 900000)"
       ],
       "params": {
@@ -1070,7 +1087,7 @@
     },
     {
       "name": "ops_cancel_trip",
-      "description": "Ops: cancel any unfinished trip, including one in progress, with a mandatory note and an optional fee (0 up to the fare). Cannot act on trips where the caller is the rider or the driver. Audited with the ops actor.",
+      "description": "Ops: cancel any unfinished trip, including one in progress, with a mandatory note and an optional fee (0 up to the fare). Cannot act on trips where the caller is the rider or the driver. Audited with the ops actor. Deletes the trip's live location.",
       "operation": "batch",
       "statements": [
         "INSERT OR IGNORE INTO trip_lifecycle (rider_id, trip_id, updated_at) SELECT t.rider_id, t.id, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0",
@@ -1081,6 +1098,7 @@
         "UPDATE ride_requests SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = ride_requests.rider_id AND t.request_id = ride_requests.id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0)",
         "UPDATE dispatch_offers SET status = 'cancelled', responded_at = :__now WHERE status IN ('offered', 'accepted') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_offers.rider_id AND t.request_id = dispatch_offers.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0)",
         "UPDATE dispatch_requests SET status = 'cancelled', updated_at = :__now WHERE status IN ('searching', 'matched') AND EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = dispatch_requests.rider_id AND t.request_id = dispatch_requests.request_id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0)",
+        "DELETE FROM trip_locations WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trip_locations.rider_id AND t.id = trip_locations.trip_id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0)",
         "UPDATE trips SET status = 'cancelled', updated_at = :__now WHERE EXISTS (SELECT 1 FROM trips t WHERE t.rider_id = trips.rider_id AND t.id = trips.id AND t.rider_id = :rider_id AND t.id = :trip_id AND t.rider_id != :__user_id AND NOT EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND t.status IN ('scheduled', 'en_route', 'arrived') AND length(trim(coalesce(:note, ''))) > 0)"
       ],
       "params": {
@@ -1272,6 +1290,50 @@
           "ops"
         ]
       }
+    },
+    {
+      "name": "publish_driver_location",
+      "description": "Driver: publish the assigned driver's position for a trip. Accepted only from the assigned driver while the trip is en_route or arrived (including in progress), never before they start driving or after the trip ends; at most one update per 3s (faster calls are dropped); implausible coordinates, accuracy (>500 m) or speed are dropped. Coordinates are rounded to 4 decimals (about 11 m) before storing. Only the latest position is kept, overwritten in place, and it is deleted when the trip ends; positions older than 24 hours are purged on every publish.",
+      "operation": "batch",
+      "statements": [
+        "DELETE FROM trip_locations WHERE updated_at < :__now - 86400000 AND :__user_id IS NOT NULL",
+        "INSERT INTO trip_locations (rider_id, trip_id, driver_id, lat, lng, accuracy_m, speed_mps, updated_at) SELECT t.rider_id, t.id, :__user_id, ROUND(:lat, 4), ROUND(:lng, 4), :accuracy_m, :speed_mps, :__now FROM trips t WHERE t.rider_id = :rider_id AND t.id = :trip_id AND t.status IN ('en_route', 'arrived') AND EXISTS (SELECT 1 FROM assignments a JOIN drivers d ON d.rider_id = a.rider_id AND d.id = a.driver_id WHERE a.rider_id = t.rider_id AND a.id = t.assignment_id AND d.user_id = :__user_id) AND :lat BETWEEN -90 AND 90 AND :lng BETWEEN -180 AND 180 AND coalesce(:accuracy_m, 0) BETWEEN 0 AND 500 AND coalesce(:speed_mps, 0) BETWEEN 0 AND 70 ON CONFLICT (rider_id, trip_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, accuracy_m = excluded.accuracy_m, speed_mps = excluded.speed_mps, driver_id = excluded.driver_id, updated_at = excluded.updated_at WHERE :__now - trip_locations.updated_at >= 3000"
+      ],
+      "params": {
+        "rider_id": {
+          "type": "string"
+        },
+        "trip_id": {
+          "type": "string"
+        },
+        "lat": {
+          "type": "number"
+        },
+        "lng": {
+          "type": "number"
+        },
+        "accuracy_m": {
+          "type": "number",
+          "optional": true
+        },
+        "speed_mps": {
+          "type": "number",
+          "optional": true
+        }
+      },
+      "requires_auth": true
+    },
+    {
+      "name": "get_driver_location",
+      "description": "Rider: the assigned driver's latest position for the caller's own ride, with its age in milliseconds measured by the server clock. Returns a row only while the trip is en_route or arrived (including in progress); nothing before the driver starts driving or after the trip ends. The driver cannot read it, and no one else can.",
+      "operation": "query",
+      "sql": "SELECT l.lat, l.lng, l.accuracy_m, l.speed_mps, :__now - l.updated_at AS age_ms, t.status AS trip_status FROM trip_locations l JOIN trips t ON t.rider_id = l.rider_id AND t.id = l.trip_id WHERE l.rider_id = :__user_id AND t.request_id = :request_id AND t.status IN ('en_route', 'arrived')",
+      "params": {
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "requires_auth": true
     }
   ]
 }
