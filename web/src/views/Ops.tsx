@@ -4,12 +4,14 @@ import { useAuth } from '../lib/useAuth'
 import { hasRole, loadAlerts } from '../lib/opsConsole'
 import DriversPanel from './ops/DriversPanel'
 import HealthPanel from './ops/HealthPanel'
+import SafetyPanel from './ops/SafetyPanel'
 import TripsPanel from './ops/TripsPanel'
 import { AuditPanel, DisputesPanel, EscalationsPanel, RefundsPanel } from './ops/QueuePanels'
 
 const TABS = [
   { id: 'trips', label: 'Trips' },
   { id: 'drivers', label: 'Drivers' },
+  { id: 'safety', label: 'Safety' },
   { id: 'disputes', label: 'Disputes' },
   { id: 'refunds', label: 'Refunds' },
   { id: 'escalations', label: 'Escalations' },
@@ -78,6 +80,7 @@ export default function Ops() {
       </div>
       {tab === 'trips' && <TripsPanel canSeePii={role.pii} />}
       {tab === 'drivers' && <DriversPanel canSeePii={role.pii} />}
+      {tab === 'safety' && <SafetyPanel canSeePii={role.pii} />}
       {tab === 'disputes' && <DisputesPanel />}
       {tab === 'refunds' && <RefundsPanel />}
       {tab === 'escalations' && <EscalationsPanel />}

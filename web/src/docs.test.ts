@@ -14,7 +14,7 @@ const tools = mcpFile.tools as unknown as { name: string; operation: string; sql
 describe('runbooks', () => {
   const alertsSql = tools.find((t) => t.name === 'ops_health_alerts')!.sql!
   const codes = [...alertsSql.matchAll(/SELECT '([a-z_]+)' AS code/g)].map((m) => m[1])
-  const runbooks = [...new Set([...alertsSql.matchAll(/'((?:dispatch|map|notification)-outage|rollback)' AS runbook/g)].map((m) => m[1]))]
+  const runbooks = [...new Set([...alertsSql.matchAll(/'((?:dispatch|map|notification)-outage|rollback|safety-incident)' AS runbook/g)].map((m) => m[1]))]
   const readme = read('runbooks/README.md')
 
   it('every alert the console can fire is documented with its threshold', () => {
@@ -23,24 +23,24 @@ describe('runbooks', () => {
     expect(readme).toContain('`<domain>_error_rate`')
   })
 
-  it('every runbook an alert points to exists, and the four the issue asks for are present', () => {
+  it('every runbook an alert points to exists, and the ones the issues ask for are present', () => {
     for (const name of runbooks) expect(existsSync(join(DOCS, 'runbooks', `${name}.md`)), name).toBe(true)
     for (const name of ['dispatch-outage', 'map-outage', 'notification-outage', 'rollback']) expect(existsSync(join(DOCS, 'runbooks', `${name}.md`)), name).toBe(true)
-    expect(runbooks.sort()).toEqual(['dispatch-outage', 'map-outage', 'notification-outage', 'rollback'])
+    expect(runbooks.sort()).toEqual(['dispatch-outage', 'map-outage', 'notification-outage', 'rollback', 'safety-incident'])
   })
 
   it('every link between the documents resolves', () => {
-    for (const file of ['runbooks/README.md', 'runbooks/dispatch-outage.md', 'runbooks/map-outage.md', 'runbooks/notification-outage.md', 'runbooks/rollback.md', 'reliability.md']) {
+    for (const file of ['runbooks/README.md', 'runbooks/dispatch-outage.md', 'runbooks/map-outage.md', 'runbooks/notification-outage.md', 'runbooks/rollback.md', 'runbooks/safety-incident.md', 'safety.md', 'reliability.md']) {
       const base = join(DOCS, file, '..')
       for (const m of read(file).matchAll(/\]\(((?!https?:|#)[^)#]+)(?:#[^)]*)?\)/g)) expect(existsSync(join(base, m[1])), `${file} -> ${m[1]}`).toBe(true)
     }
   })
 
   it('each runbook says how to contain, recover and confirm', () => {
-    for (const name of ['dispatch-outage', 'map-outage', 'notification-outage', 'rollback']) {
+    for (const name of ['dispatch-outage', 'map-outage', 'notification-outage', 'rollback', 'safety-incident']) {
       const text = read(`runbooks/${name}.md`)
-      expect(text, name).toMatch(/Recover|After any rollback/)
-      expect(text, name).toMatch(/Pause|pause|revert|Nothing to repair/)
+      expect(text, name).toMatch(/Recover|After any rollback|Resolve/)
+      expect(text, name).toMatch(/Pause|pause|revert|Nothing to repair|Contain/)
     }
   })
 
@@ -75,5 +75,37 @@ describe('the outside probe', () => {
     expect(workflow).toContain('api.proappstore.online/health')
     expect(workflow).toContain('/v1/apps/loopride/tools')
     expect(workflow).toContain('mcp.json')
+  })
+})
+
+describe('safety documentation (issue #12)', () => {
+  const safety = read('safety.md')
+  const runbook = read('runbooks/safety-incident.md')
+
+  it('defines the escalation target, the blocking policy and the jurisdictional limits', () => {
+    expect(safety).toMatch(/within 5 minutes/)
+    expect(safety).toContain('ops_suspend_driver')
+    expect(safety).toContain('ops_block_rider')
+    expect(safety).toContain('## Needs a human decision')
+    expect(safety).toMatch(/not an emergency service/)
+    expect(safety).toMatch(/nothing pages\s+anyone/)
+  })
+
+  it('the escalation target is the one the alert measures', () => {
+    const sql = tools.find((t) => t.name === 'ops_health_alerts')!.sql!
+    expect(sql).toContain("r.created_at <= :__now - 300000")
+    expect(read('runbooks/README.md')).toContain('`safety_unacknowledged`')
+  })
+
+  it('the runbook puts emergency services before the console and names the audited actions', () => {
+    expect(runbook.indexOf('emergency services')).toBeLessThan(runbook.indexOf('## 1.'))
+    for (const word of ['Acknowledge', 'Cancel trip', 'Suspend driver', 'Block rider', 'Resolve']) expect(runbook).toContain(word)
+  })
+
+  it('the emergency copy the screens show is the copy the policy quotes', () => {
+    const copy = readFileSync(join(DOCS, '..', 'web', 'src', 'lib', 'safety.ts'), 'utf8')
+    for (const line of ['If you are in immediate danger, contact your local emergency services now. Do not wait for a reply from us.', 'LoopRide is not an emergency service. We cannot call emergency services for you, send help to your location or tell you how quickly staff will see a report.'])
+      expect(copy).toContain(line)
+    expect(safety.replace(/\n> ?/g, ' ').replace(/\s+/g, ' ')).toContain('If you are in immediate danger, contact your local emergency services now. Do not wait for a reply from us.')
   })
 })

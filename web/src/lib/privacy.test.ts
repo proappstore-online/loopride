@@ -73,6 +73,7 @@ describe('retention summary', () => {
       'Notifications: 30 days',
       'Diagnostic events: 14 days',
       'Diagnostic counters: 14 days',
+      'Safety report snapshots: 30 days',
     ])
   })
 

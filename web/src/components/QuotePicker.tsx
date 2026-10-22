@@ -3,6 +3,7 @@ import type { LatLng, RecurringRide, VehicleType } from '../types'
 import { VEHICLES } from '../types'
 import { firstMatch } from '../lib/maps'
 import { fetchRoute } from '../lib/routing'
+import { accountBlocked, SAFETY_COPY } from '../lib/safety'
 import { acceptQuote, dispatchPaused, isEligible, PAUSED_TEXT, isExpired, REASON_TEXT, requestQuotes, secondsLeft, surgeLabel, type Quote, type QuoteRoute } from '../lib/quotes'
 
 const usd = (cents: number) => `$${(cents / 100).toFixed(2)}`
@@ -114,7 +115,8 @@ export default function QuotePicker({ pickup, pickupCoord, dropoff, dropoffCoord
       if (result.ok) return onAccepted(ride)
       const nowPaused = await dispatchPaused()
       setPaused(nowPaused)
-      setError(nowPaused ? PAUSED_TEXT : REASON_TEXT[result.reason])
+      const restricted = !nowPaused && (await accountBlocked())
+      setError(nowPaused ? PAUSED_TEXT : restricted ? SAFETY_COPY.blocked : REASON_TEXT[result.reason])
       setQuotes((current) => current.filter((q) => q.id !== chosen.id).map((q) => ({ ...q, expiresAt: result.reason === 'expired' ? 0 : q.expiresAt })))
       setSelected(null)
     } catch {

@@ -70,6 +70,9 @@ No payment is collected (ADR 0001), so there is no external payment call. Money 
 | `ops_suspend_driver`, `ops_reinstate_driver` | harmless | guarded by `approved` / `suspended` |
 | `ops_cancel_trip`, `ops_resolve_dispute`, `ops_log_access` | harmless / append | guarded by an open trip / open dispute; an access entry per call is intended |
 | `ops_set_service_flag` | harmless | a repeat of the current state is ignored |
+| `submit_safety_report` | harmless | by key: the report id is the person's id plus `request_key`, so a retry files once and nobody else's key can collide; the app reads the report back to confirm, because a refused report writes nothing and raises no error |
+| `ops_update_safety_report` | harmless | guarded by the status it leaves (`open` to `in_review`, then `resolved`); a resolved report cannot change |
+| `ops_block_rider`, `ops_lift_rider_block` | harmless | guarded by the current block state (append-only log; a repeat of the current state is ignored) |
 | `report_client_event` | best effort | deduplicated in the app (30 s) and capped at 20 per minute per person by the server; failures are swallowed |
 | `report_client_metrics` | additive | counters for the same minute add up; a lost report loses that minute |
 | `set_location_consent` | harmless | an upsert of the same value; withdrawing re-runs its erasures, which find nothing |

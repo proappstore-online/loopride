@@ -25,6 +25,8 @@ import { showToast } from '../lib/toast'
 import { loadReceipt, type Receipt } from '../lib/receipts'
 import ReceiptCard from '../components/ReceiptCard'
 import { reportError } from '../lib/telemetry'
+import { canReportSafety } from '../lib/safety'
+import SafetyPanel from '../components/SafetyPanel'
 
 const TripMap = lazy(() => import('./TripMap'))
 
@@ -51,7 +53,7 @@ export default function Trip({ rideId }: TripProps) {
   const [dispatch, setDispatch] = useState<DispatchStatus | null>(null)
   const [trip, setTrip] = useState<TripState | null>(null)
   const [searchRun, setSearchRun] = useState(0)
-  const [panel, setPanel] = useState<'cancel' | 'dispute' | null>(null)
+  const [panel, setPanel] = useState<'cancel' | 'dispute' | 'safety' | null>(null)
   const [receipt, setReceipt] = useState<Receipt | null>(null)
   const managed = Boolean(ride?.quoteId)
 
@@ -269,6 +271,9 @@ export default function Trip({ rideId }: TripProps) {
               Driver hasn't arrived
             </button>
           )}
+          {trip && canReportSafety(trip, now) && panel !== 'safety' && (
+            <button onClick={() => setPanel('safety')} className="rounded-2xl border border-[var(--error)] px-5 py-2 text-sm font-semibold text-[var(--error)]">Safety</button>
+          )}
           {trip && isFinished(trip.phase) && !trip.disputed && panel !== 'dispute' && (
             <button onClick={() => setPanel('dispute')} className="rounded-2xl border border-[var(--line)] px-5 py-2 text-sm font-semibold text-[var(--ink)]">Report a problem</button>
           )}
@@ -294,6 +299,7 @@ export default function Trip({ rideId }: TripProps) {
             }}
           />
         )}
+        {panel === 'safety' && trip && <SafetyPanel riderId={currentUserId() ?? ''} tripId={trip.tripId} role="rider" onClose={() => setPanel(null)} />}
         {panel === 'dispute' && trip && (
           <DisputePanel
             tripId={trip.tripId}

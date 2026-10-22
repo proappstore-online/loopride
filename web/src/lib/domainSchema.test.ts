@@ -3041,7 +3041,7 @@ describe('observability: events, metrics, alerts, invariants, dispatch switch', 
       for (const a of all) {
         expect(a.threshold, a.code).not.toBe('')
         expect(a.message, a.code).not.toBe('')
-        expect(['dispatch-outage', 'map-outage', 'notification-outage', 'rollback'], a.code).toContain(a.runbook)
+        expect(['dispatch-outage', 'map-outage', 'notification-outage', 'rollback', 'safety-incident'], a.code).toContain(a.runbook)
       }
       event('u', { domain: 'transition', code: 'step_rejected' }); event('u', { domain: 'transition', code: 'step_rejected' }, NOW + 1); event('u', { domain: 'transition', code: 'step_rejected' }, NOW + 2)
       expect(alerts(NOW + 10)[0]).toMatchObject({ code: 'transition_errors', firing: 1, severity: 'critical' })
@@ -3284,6 +3284,361 @@ describe('observability: events, metrics, alerts, invariants, dispatch switch', 
       pause({ paused: 0, reason_code: 'resolved', note: 'back' }, 'ops', NOW + 9)
       expect(alert('dispatch_paused', NOW + 10).firing).toBe(0)
       expect((as('ops', 'ops_list_audit') as { action: string }[]).filter((a) => a.action.startsWith('service_')).map((a) => a.action)).toEqual(['service_resumed', 'service_paused'])
+    })
+  })
+})
+
+describe('rider safety, reporting and incident response (issue #12)', () => {
+  let db: Db
+  const NOW = Date.UTC(2026, 5, 1)
+  const MIN = 60_000
+  const DAY = 86_400_000
+  const SYDNEY = { lat: -33.8688, lng: 151.2093 }
+  const AIRPORT = { lat: -33.8688 + 0.045, lng: 151.2093 }
+
+  beforeEach(() => {
+    db = new DatabaseSync(':memory:')
+    migrate(db, new Set())
+  })
+
+  const as = (user: string, name: string, params: Record<string, unknown> = {}, now = NOW) => call(db, name, params, user, now) as Record<string, unknown>[]
+  const rows = (sql: string) => db.prepare(sql).all() as Record<string, unknown>[]
+  const makeDriver = (id: string) => {
+    as(id, 'save_driver_application', { full_name: `Driver ${id}`, phone: '555-0100', licence_number: `LIC-${id}`, licence_region: 'NSW', licence_expires: '2030-01-01', eligibility_confirmed: 1 })
+    as(id, 'save_driver_vehicle', { vehicle_id: `v-${id}`, plate: `PL-${id}`, make: 'T', model: 'C', vehicle_class: 'share' })
+    as(id, 'submit_driver_application')
+    as('ops', 'review_driver_application', { driver_user_id: id, decision: 'approved' })
+    as(id, 'update_driver_location', { ...SYDNEY, service_radius_km: 10 })
+    as(id, 'set_driver_availability', { available: 1, vehicle_id: `v-${id}` })
+  }
+  const matched = (id = 'r1', rider = 'rider-1', driver = 'd1') => {
+    if (!db.prepare('SELECT 1 FROM drivers WHERE user_id = ?').get(driver)) makeDriver(driver)
+    db.prepare('UPDATE driver_availability SET available = CASE WHEN user_id = ? THEN 1 ELSE 0 END').run(driver)
+    as(rider, 'save_ride', { ...rideToRecords({ id, pickup: '12 Secret Lane', pickupCoord: SYDNEY, dropoff: '1 Airport Rd', dropoffCoord: AIRPORT, days: [], time: '', driverName: '', paused: false, createdAt: 1, requestedAt: 1, bookingType: 'now', vehicle: 'share', fareCents: 1500 }) })
+    as(rider, 'request_dispatch', { request_id: id })
+    as(rider, 'dispatch_tick', { request_id: id })
+    as(driver, 'accept_offer', { rider_id: rider, request_id: id })
+  }
+  const trip = (id = 'r1', rider = 'rider-1') => ({ rider_id: rider, trip_id: `${id}:trip` })
+  const step = (to: string, now = NOW) => as('d1', 'advance_trip', { ...trip(), to_status: to }, now)
+  const ping = (at = NOW) => as('d1', 'publish_driver_location', { ...trip(), ...SYDNEY, accuracy_m: 8 }, at)
+  const report = (user: string, category: string, key = 'k1', extra: Record<string, unknown> = {}, now = NOW) =>
+    as(user, 'submit_safety_report', { ...trip(), request_key: key, category, note: 'He drove through a red light', ...extra }, now)
+  const reports = () => rows('SELECT * FROM safety_reports ORDER BY created_at, id')
+  const queue = (params: Record<string, unknown> = {}, now = NOW) => as('ops', 'ops_list_safety_reports', params, now)
+  const alertRow = (now: number) => (as('ops', 'ops_health_alerts', {}, now) as { code: string; firing: number; value: number }[]).find((a) => a.code === 'safety_unacknowledged')!
+
+  describe('manifest', () => {
+    it('ops actions are role-gated, personal details need ops_pii, rider and driver actions are open', () => {
+      for (const name of ['ops_list_safety_reports', 'ops_update_safety_report', 'ops_block_rider', 'ops_lift_rider_block', 'ops_list_rider_blocks'])
+        expect(tool(name), name).toMatchObject({ auth: { required: true, app_roles: ['ops'] } })
+      expect(tool('ops_get_safety_report_pii')).toMatchObject({ auth: { required: true, app_roles: ['ops_pii'] } })
+      for (const name of ['submit_safety_report', 'list_my_safety_reports', 'get_my_account_standing']) expect((tool(name) as unknown as { auth?: unknown }).auth, name).toBeUndefined()
+    })
+  })
+
+  describe('filing a report', () => {
+    it('a rider reports the driver mid-trip: trip context, the driver position and the other party are kept', () => {
+      matched(); step('en_route'); ping()
+      report('rider-1', 'unsafe_driving')
+      expect(reports()).toMatchObject([{ id: 'rider-1:k1', rider_id: 'rider-1', trip_id: 'r1:trip', reporter_id: 'rider-1', reporter_role: 'rider', subject_id: 'd1', subject_role: 'driver', category: 'unsafe_driving', urgency: 'standard', note: 'He drove through a red light', trip_phase: 'en_route', vehicle_class: 'share', status: 'open', created_at: NOW }])
+      expect(rows('SELECT * FROM safety_report_snapshots')).toMatchObject([{ report_id: 'rider-1:k1', rider_id: 'rider-1', pickup_label: '12 Secret Lane', dropoff_label: '1 Airport Rd', driver_name: expect.any(String), plate: 'PL-d1', lat: SYDNEY.lat, lng: SYDNEY.lng, position_at: NOW, captured_at: NOW }])
+    })
+
+    it('the assigned driver reports the rider; the driver sees their own report, the rider sees nothing', () => {
+      matched(); step('en_route')
+      report('d1', 'harassment')
+      expect(reports()).toMatchObject([{ reporter_id: 'd1', reporter_role: 'driver', subject_id: 'rider-1', subject_role: 'rider' }])
+      expect(as('d1', 'list_my_safety_reports')).toHaveLength(1)
+      expect(as('rider-1', 'list_my_safety_reports')).toEqual([])
+    })
+
+    it('a report with no shared position still keeps the rest of the context', () => {
+      matched()
+      report('rider-1', 'vehicle_mismatch')
+      expect(rows('SELECT lat, lng, position_at, plate FROM safety_report_snapshots')).toEqual([{ lat: null, lng: null, position_at: null, plate: 'PL-d1' }])
+    })
+
+    it('can be filed after the trip ended, for 7 days, but not later', () => {
+      matched(); step('en_route', NOW); step('arrived', NOW + 1000); as('d1', 'start_trip', trip(), NOW + 2000); step('completed', NOW + 3000)
+      report('rider-1', 'harassment', 'late', {}, NOW + 6 * DAY)
+      expect(reports()).toHaveLength(1)
+      report('rider-1', 'harassment', 'too-late', {}, NOW + 8 * DAY)
+      expect(reports()).toHaveLength(1)
+    })
+
+    it('anyone who is not the rider or assigned driver changes nothing; neither do unknown categories, blank keys or other trips', () => {
+      matched(); makeDriver('d2')
+      report('stranger', 'assault')
+      report('d2', 'assault')
+      report('rider-1', 'not_a_category')
+      report('rider-1', 'other', '')
+      report('rider-1', 'other', 'k', { trip_id: 'nope' })
+      expect(reports()).toEqual([])
+      expect(rows('SELECT * FROM ops_escalations')).toEqual([])
+    })
+
+    it('the server decides urgency, a retry files once, and one person cannot overwrite another\'s key', () => {
+      matched(); step('en_route')
+      report('rider-1', 'emergency', 'same')
+      report('rider-1', 'emergency', 'same', {}, NOW + 5000)
+      report('d1', 'other', 'same')
+      expect(reports().map((r) => [r.id, r.urgency])).toEqual([['d1:same', 'standard'], ['rider-1:same', 'urgent']])
+      expect(rows('SELECT * FROM ops_escalations')).toHaveLength(1)
+    })
+
+    it('urgent categories open a safety escalation naming the driver; standard ones do not', () => {
+      matched(); step('en_route')
+      for (const [i, category] of ['emergency', 'assault', 'impaired'].entries()) report('rider-1', category, `u${i}`)
+      expect(rows('SELECT id, level, reason_code, status, opened_by, driver_user_id, trip_id FROM ops_escalations ORDER BY id')).toEqual([
+        { id: 'safety:rider-1:u0', level: 'safety', reason_code: 'safety', status: 'open', opened_by: 'rider-1', driver_user_id: 'd1', trip_id: 'r1:trip' },
+        { id: 'safety:rider-1:u1', level: 'safety', reason_code: 'safety', status: 'open', opened_by: 'rider-1', driver_user_id: 'd1', trip_id: 'r1:trip' },
+        { id: 'safety:rider-1:u2', level: 'safety', reason_code: 'safety', status: 'open', opened_by: 'rider-1', driver_user_id: 'd1', trip_id: 'r1:trip' },
+      ])
+      report('rider-1', 'unsafe_driving', 's')
+      expect(rows('SELECT * FROM ops_escalations')).toHaveLength(3)
+    })
+
+    it('limits standard reports to 5 an hour per person but never an urgent one', () => {
+      matched(); step('en_route')
+      for (let i = 0; i < 7; i++) report('rider-1', 'other', `s${i}`, {}, NOW + i * 1000)
+      expect(reports()).toHaveLength(5)
+      report('rider-1', 'emergency', 'help', {}, NOW + 10_000)
+      expect(reports()).toHaveLength(6)
+      report('rider-1', 'other', 'later', {}, NOW + 61 * MIN)
+      expect(reports()).toHaveLength(7)
+    })
+
+    it('trims the note to 200 characters', () => {
+      matched()
+      report('rider-1', 'other', 'k', { note: `  ${'x'.repeat(300)}  ` })
+      expect((reports()[0].note as string).length).toBe(200)
+    })
+  })
+
+  describe('the reporter\'s own view and export', () => {
+    it('lists only their reports, without staff notes or the other person\'s id', () => {
+      matched(); report('rider-1', 'harassment')
+      as('ops', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'resolved', resolution_code: 'warned', note: 'internal: previous complaints' }, NOW + MIN)
+      const mine = as('rider-1', 'list_my_safety_reports')
+      expect(mine).toMatchObject([{ id: 'rider-1:k1', status: 'resolved', resolution_code: 'warned' }])
+      expect(JSON.stringify(mine)).not.toContain('previous complaints')
+      expect(Object.keys(mine[0])).not.toContain('subject_id')
+    })
+  })
+
+  describe('the staff queue', () => {
+    it('lists urgent first then oldest, redacted, with a status filter', () => {
+      matched(); report('rider-1', 'other', 'a', {}, NOW); report('rider-1', 'assault', 'b', {}, NOW + 5000); report('rider-1', 'harassment', 'c', {}, NOW + 1000)
+      expect(queue({}, NOW + MIN).map((r) => r.id)).toEqual(['rider-1:b', 'rider-1:a', 'rider-1:c'])
+      const first = queue()[0]
+      expect(first).toMatchObject({ category: 'assault', urgency: 'urgent', reporter_role: 'rider', subject_id: 'd1', trip_phase: 'scheduled' })
+      expect(JSON.stringify(queue())).not.toMatch(/Secret Lane|Airport Rd|PL-d1|Driver d1/)
+      as('ops', 'ops_update_safety_report', { report_id: 'rider-1:a', status: 'in_review' }, NOW + MIN)
+      expect(queue({ status: 'in_review' }, NOW + MIN).map((r) => r.id)).toEqual(['rider-1:a'])
+    })
+
+    it('hides reports the staff member is part of', () => {
+      matched(); report('rider-1', 'harassment')
+      expect(as('rider-1', 'ops_list_safety_reports')).toEqual([])
+      expect(as('d1', 'ops_list_safety_reports')).toEqual([])
+      as('rider-1', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'in_review' })
+      expect(reports()[0].status).toBe('open')
+    })
+
+    it('acknowledges once, records who and when, and resolves with a code and a note', () => {
+      matched(); report('rider-1', 'impaired')
+      as('ops', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'in_review' }, NOW + 2 * MIN)
+      as('ops2', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'in_review' }, NOW + 3 * MIN)
+      expect(reports()[0]).toMatchObject({ status: 'in_review', acknowledged_by: 'ops', acknowledged_at: NOW + 2 * MIN })
+      as('ops2', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'resolved', resolution_code: 'made_up', note: 'x' }, NOW + 4 * MIN)
+      as('ops2', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'resolved', resolution_code: 'warned', note: '  ' }, NOW + 4 * MIN)
+      expect(reports()[0].status).toBe('in_review')
+      as('ops2', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'resolved', resolution_code: 'driver_suspended', note: 'Suspended pending review' }, NOW + 5 * MIN)
+      expect(reports()[0]).toMatchObject({ status: 'resolved', resolved_by: 'ops2', resolved_at: NOW + 5 * MIN, resolution_code: 'driver_suspended', resolution_note: 'Suspended pending review', acknowledged_by: 'ops' })
+      expect(queue()).toEqual([])
+    })
+
+    it('a resolved report cannot be reopened or changed, and resolving also resolves the linked escalation', () => {
+      matched(); report('rider-1', 'assault')
+      as('ops', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'resolved', resolution_code: 'no_action', note: 'checked, nothing found' }, NOW + MIN)
+      expect(rows('SELECT status, resolved_by, resolution_note FROM ops_escalations')).toEqual([{ status: 'resolved', resolved_by: 'ops', resolution_note: 'checked, nothing found' }])
+      as('ops2', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'in_review' }, NOW + 2 * MIN)
+      as('ops2', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'resolved', resolution_code: 'warned', note: 'changed my mind' }, NOW + 2 * MIN)
+      expect(reports()[0]).toMatchObject({ status: 'resolved', resolved_by: 'ops', resolution_code: 'no_action' })
+    })
+
+    it('acting on a report is in the audit trail', () => {
+      matched(); report('rider-1', 'assault')
+      as('ops', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'in_review' }, NOW + MIN)
+      as('ops', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'resolved', resolution_code: 'warned', note: 'spoken to' }, NOW + 2 * MIN)
+      const actions = (as('ops', 'ops_list_audit', {}, NOW + 3 * MIN) as { action: string; actor_id: string; trip_id: string }[]).filter((a) => a.action.startsWith('safety_report') || a.action === 'escalated_safety' || a.action === 'escalation_resolved')
+      expect(actions.map((a) => a.action).sort()).toEqual(['escalated_safety', 'escalation_resolved', 'safety_report_acknowledged', 'safety_report_resolved'])
+      expect(actions.every((a) => a.trip_id === 'r1:trip')).toBe(true)
+    })
+  })
+
+  describe('personal details need a logged reason', () => {
+    const reveal = (user = 'ops', now = NOW + MIN) => as(user, 'ops_get_safety_report_pii', { report_id: 'rider-1:k1' }, now)
+    const log = (scope: string, now = NOW + MIN) => as('ops', 'ops_log_access', { scope, ...trip(), driver_user_id: null, reason_code: 'safety_incident' }, now)
+
+    it('returns nothing until access is logged, then addresses for trip_pii and coordinates only for evidence', () => {
+      matched(); step('en_route'); ping(); report('rider-1', 'unsafe_driving')
+      expect(reveal()).toEqual([])
+      log('trip_pii')
+      expect(reveal()).toMatchObject([{ pickup_label: '12 Secret Lane', dropoff_label: '1 Airport Rd', plate: 'PL-d1', lat: null, lng: null }])
+      log('evidence')
+      expect(reveal()).toMatchObject([{ pickup_label: '12 Secret Lane', lat: SYDNEY.lat, lng: SYDNEY.lng, position_at: NOW }])
+    })
+
+    it('access expires after 10 minutes', () => {
+      matched(); report('rider-1', 'unsafe_driving'); log('trip_pii')
+      expect(reveal('ops', NOW + MIN + 9 * MIN)).toHaveLength(1)
+      expect(reveal('ops', NOW + MIN + 11 * MIN)).toEqual([])
+    })
+
+    it('a staff member cannot read details of a report they are part of, and another staff member\'s log does not count', () => {
+      matched(); report('rider-1', 'unsafe_driving'); log('trip_pii')
+      expect(reveal('ops2')).toEqual([])
+      as('rider-1', 'ops_log_access', { scope: 'trip_pii', ...trip(), driver_user_id: null, reason_code: 'safety_incident' }, NOW + MIN)
+      expect(reveal('rider-1')).toEqual([])
+    })
+  })
+
+  describe('alerting', () => {
+    it('fires when an urgent report sits unacknowledged for 5 minutes, and clears on acknowledgement', () => {
+      matched(); report('rider-1', 'assault')
+      expect(alertRow(NOW + 4 * MIN)).toMatchObject({ firing: 0, value: 0 })
+      expect(alertRow(NOW + 5 * MIN)).toMatchObject({ firing: 1, value: 1 })
+      as('ops', 'ops_update_safety_report', { report_id: 'rider-1:k1', status: 'in_review' }, NOW + 6 * MIN)
+      expect(alertRow(NOW + 7 * MIN)).toMatchObject({ firing: 0 })
+    })
+
+    it('ignores standard reports and carries the runbook', () => {
+      matched(); report('rider-1', 'harassment')
+      expect(alertRow(NOW + 60 * MIN)).toMatchObject({ firing: 0 })
+      const a = as('ops', 'ops_health_alerts', {}, NOW + MIN).find((x) => x.code === 'safety_unacknowledged')
+      expect(a).toMatchObject({ domain: 'safety', severity: 'critical', runbook: 'safety-incident' })
+    })
+  })
+
+  describe('blocking a rider', () => {
+    const block = (rider = 'rider-1', extra: Record<string, unknown> = {}, now = NOW + MIN, who = 'ops') => as(who, 'ops_block_rider', { rider_user_id: rider, reason_code: 'safety', note: 'Threatened a driver', ...extra }, now)
+    const standing = (user = 'rider-1') => as(user, 'get_my_account_standing')
+    const dispatchRows = () => rows('SELECT status FROM dispatch_requests')
+
+    it('refuses new ride requests, says so in the rider\'s standing, and is audited', () => {
+      as('rider-1', 'save_ride', { ...rideToRecords({ id: 'n1', pickup: 'A', pickupCoord: SYDNEY, dropoff: 'B', dropoffCoord: AIRPORT, days: [], time: '', driverName: '', paused: false, createdAt: 1, requestedAt: 1, bookingType: 'now', vehicle: 'share', fareCents: 1500 }) })
+      makeDriver('d1')
+      expect(standing()).toEqual([{ rider_blocked: 0 }])
+      block()
+      expect(standing()).toEqual([{ rider_blocked: 1 }])
+      as('rider-1', 'request_dispatch', { request_id: 'n1' }, NOW + 2 * MIN)
+      expect(dispatchRows()).toEqual([])
+      expect(as('ops', 'ops_list_rider_blocks', {}, NOW + 2 * MIN)).toMatchObject([{ rider_id: 'rider-1', reason_code: 'safety', note: 'Threatened a driver', actor_id: 'ops' }])
+      expect((as('ops', 'ops_list_audit', {}, NOW + 3 * MIN) as { action: string }[]).map((a) => a.action)).toContain('rider_blocked')
+      expect(standing('rider-2')).toEqual([{ rider_blocked: 0 }])
+    })
+
+    it('refuses to accept a quote while blocked and accepts it again once lifted', () => {
+      makeDriver('d1')
+      const route = { pickup_label: 'Central', pickup_lat: SYDNEY.lat, pickup_lng: SYDNEY.lng, dropoff_label: 'North', dropoff_lat: AIRPORT.lat, dropoff_lng: AIRPORT.lng, distance_m: 5000, duration_s: 600 }
+      const accept = (id: string, now: number) => as('rider-1', 'accept_quote', { quote_id: id, ride_id: `ride-${id}`, client_record: '{}', pickup_lat: route.pickup_lat, pickup_lng: route.pickup_lng, dropoff_lat: route.dropoff_lat, dropoff_lng: route.dropoff_lng, distance_m: route.distance_m }, now)
+      as('rider-1', 'create_quote', { quote_id: 'q1', vehicle_class: 'share', ...route }, NOW)
+      block()
+      accept('q1', NOW + 2 * MIN)
+      expect(rows("SELECT status FROM fare_quotes WHERE id = 'q1'")).toEqual([{ status: 'pending' }])
+      expect(rows('SELECT * FROM ride_requests')).toEqual([])
+      as('ops2', 'ops_lift_rider_block', { rider_user_id: 'rider-1', reason_code: 'appeal_upheld', note: 'Appeal reviewed' }, NOW + 3 * MIN)
+      expect(standing()).toEqual([{ rider_blocked: 0 }])
+      accept('q1', NOW + 3 * MIN + 1000)
+      expect(rows("SELECT status FROM fare_quotes WHERE id = 'q1'")).toEqual([{ status: 'accepted' }])
+      expect(as('ops', 'ops_list_rider_blocks')).toEqual([])
+    })
+
+    it('withdraws open offers and cancels a search in progress, but leaves a trip under way alone', () => {
+      matched(); step('en_route')
+      as('rider-2', 'save_ride', { ...rideToRecords({ id: 's1', pickup: 'A', pickupCoord: SYDNEY, dropoff: 'B', dropoffCoord: AIRPORT, days: [], time: '', driverName: '', paused: false, createdAt: 1, requestedAt: 1, bookingType: 'now', vehicle: 'share', fareCents: 1500 }) })
+      makeDriver('d2')
+      as('rider-2', 'request_dispatch', { request_id: 's1' })
+      as('rider-2', 'dispatch_tick', { request_id: 's1' })
+      expect(rows("SELECT status FROM dispatch_offers WHERE rider_id = 'rider-2'")).toEqual([{ status: 'offered' }])
+      block('rider-2')
+      expect(rows("SELECT status FROM dispatch_offers WHERE rider_id = 'rider-2'")).toEqual([{ status: 'cancelled' }])
+      expect(rows("SELECT status FROM dispatch_requests WHERE rider_id = 'rider-2'")).toEqual([{ status: 'cancelled' }])
+      block('rider-1')
+      expect(rows("SELECT status FROM trips WHERE rider_id = 'rider-1'")).toEqual([{ status: 'en_route' }])
+      expect(rows("SELECT status FROM dispatch_offers WHERE rider_id = 'rider-1'")).toEqual([{ status: 'accepted' }])
+    })
+
+    it('needs a valid reason and a note, cannot target yourself, and repeating changes nothing', () => {
+      block('rider-1', { reason_code: 'whim' })
+      block('rider-1', { note: ' ' })
+      block('ops', {}, NOW + MIN, 'ops')
+      expect(rows('SELECT * FROM rider_block_log')).toEqual([])
+      block(); block('rider-1', {}, NOW + 2 * MIN, 'ops2')
+      expect(rows('SELECT action FROM rider_block_log')).toEqual([{ action: 'blocked' }])
+    })
+
+    it('lifting needs a reason and a note, only works on a block, and is audited', () => {
+      const lift = (extra: Record<string, unknown> = {}, now = NOW + 2 * MIN) => as('ops', 'ops_lift_rider_block', { rider_user_id: 'rider-1', reason_code: 'review_complete', note: 'Reviewed', ...extra }, now)
+      lift()
+      expect(rows('SELECT * FROM rider_block_log')).toEqual([])
+      block(); lift({ reason_code: 'nope' }); lift({ note: '' })
+      expect(standing()).toEqual([{ rider_blocked: 1 }])
+      lift()
+      expect(standing()).toEqual([{ rider_blocked: 0 }])
+      expect((as('ops', 'ops_list_audit', {}, NOW + 3 * MIN) as { action: string }[]).map((a) => a.action)).toEqual(expect.arrayContaining(['rider_blocked', 'rider_block_lifted']))
+    })
+
+    it('can cite a safety report, but not one that does not exist', () => {
+      matched(); report('d1', 'assault')
+      block('rider-1', { report_id: 'nope' })
+      expect(rows('SELECT * FROM rider_block_log')).toEqual([])
+      block('rider-1', { report_id: 'd1:k1' })
+      expect(rows('SELECT report_id FROM rider_block_log')).toEqual([{ report_id: 'd1:k1' }])
+    })
+
+    it('survives the rider deleting their account, so it cannot be dodged by starting over', () => {
+      matched(); block()
+      as('rider-1', 'delete_my_rider_data'); as('rider-1', 'delete_my_driver_data')
+      expect(standing()).toEqual([{ rider_blocked: 1 }])
+    })
+  })
+
+  describe('suspending a driver from a report', () => {
+    it('uses the existing audited suspension, which takes the driver off dispatch', () => {
+      matched(); step('en_route'); report('rider-1', 'impaired')
+      as('ops', 'ops_suspend_driver', { driver_user_id: 'd1', reason_code: 'safety', note: 'Impaired driving report r1' }, NOW + MIN)
+      expect(rows("SELECT status FROM driver_applications WHERE user_id = 'd1'")).toEqual([{ status: 'suspended' }])
+      expect(rows("SELECT available FROM driver_availability WHERE user_id = 'd1'")).toEqual([{ available: 0 }])
+      expect(rows("SELECT status FROM trips WHERE rider_id = 'rider-1'")).toEqual([{ status: 'en_route' }]) // a trip under way is cancelled separately
+    })
+  })
+
+  describe('retention and erasure', () => {
+    it('purges snapshots after 30 days but keeps the report', () => {
+      matched(); step('en_route'); ping(); report('rider-1', 'harassment')
+      as('rider-2', 'purge_expired_data', {}, NOW + 29 * DAY)
+      expect(rows('SELECT * FROM safety_report_snapshots')).toHaveLength(1)
+      as('rider-2', 'purge_expired_data', {}, NOW + 31 * DAY)
+      expect(rows('SELECT * FROM safety_report_snapshots')).toEqual([])
+      expect(reports()).toHaveLength(1)
+    })
+
+    it('erasing the rider deletes the snapshots (addresses, plate, position) and keeps the report, escalation and ids for audit', () => {
+      matched(); step('en_route'); ping(); report('rider-1', 'assault')
+      as('rider-1', 'delete_my_rider_data'); as('rider-1', 'delete_my_driver_data')
+      expect(rows('SELECT * FROM safety_report_snapshots')).toEqual([])
+      expect(reports()).toMatchObject([{ id: 'rider-1:k1', category: 'assault', subject_id: 'd1' }])
+      expect(rows('SELECT id FROM ops_escalations')).toEqual([{ id: 'safety:rider-1:k1' }])
+      expect(JSON.stringify(reports())).not.toMatch(/Secret Lane|PL-d1/)
+    })
+
+    it('a driver erasing their account leaves the rider\'s snapshot alone', () => {
+      matched(); step('en_route'); report('rider-1', 'unsafe_driving')
+      as('d1', 'delete_my_driver_data')
+      expect(rows('SELECT report_id FROM safety_report_snapshots')).toEqual([{ report_id: 'rider-1:k1' }])
     })
   })
 })

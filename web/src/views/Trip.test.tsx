@@ -210,6 +210,39 @@ describe('Trip: server-driven rides', () => {
     await waitFor(() => expect(api.openDispute).toHaveBeenCalledWith('rider-1', 'ride-live:trip', 'overcharged', 'extra fee'))
   })
 
+  it.each(['scheduled', 'en_route', 'arrived', 'in_progress'])('offers the rider a Safety button with emergency guidance while the trip is %s', async (phase) => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase })
+    mount('ride-live')
+    await userEvent.click(await screen.findByRole('button', { name: 'Safety' }))
+    const panel = screen.getByRole('group', { name: 'Safety' })
+    expect(panel).toHaveTextContent(/contact your local emergency services now/)
+    expect(panel).toHaveTextContent(/not an emergency service/)
+    expect(screen.getByLabelText('What happened with the driver?')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('group', { name: 'Safety' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the Safety button for a week after the trip, then drops it', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'completed', endedAt: Date.now() - 6 * 86_400_000 })
+    const recent = mount('ride-live')
+    expect(await screen.findByRole('button', { name: 'Safety' })).toBeInTheDocument()
+    recent.unmount()
+    tripState.current = lifecycle({ phase: 'completed', endedAt: Date.now() - 8 * 86_400_000 })
+    mount('ride-live')
+    await screen.findByRole('button', { name: 'Report a problem' })
+    expect(screen.queryByRole('button', { name: 'Safety' })).not.toBeInTheDocument()
+  })
+
+  it('has no Safety button before a driver is assigned', async () => {
+    dispatchState.current = { state: 'searching', attempts: 0, offerStatus: null, driverName: null, plate: null }
+    tripState.current = null
+    mount('ride-live')
+    await screen.findByText(/Searching|Looking|Finding/i)
+    expect(screen.queryByRole('button', { name: 'Safety' })).not.toBeInTheDocument()
+  })
+
   it('does not offer a report again once disputed', async () => {
     dispatchState.current = matchedDispatch
     tripState.current = lifecycle({ phase: 'completed', disputed: true })

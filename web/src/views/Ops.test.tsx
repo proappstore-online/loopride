@@ -46,6 +46,11 @@ beforeEach(() => {
     ops_health_metrics: [{ domain: 'dispatch', calls: 120, errors: 6, slow: 2, avg_latency_ms: 340, people: 9, gauge_a: 4, gauge_b: 3 }, { domain: 'maps', calls: 0, errors: 0, slow: 0, avg_latency_ms: 0, people: 0, gauge_a: null, gauge_b: null }],
     ops_health_invariants: [],
     ops_health_errors: [{ domain: 'dispatch', code: 'action_failed', severity: 'error', n: 6, people: 3, last_at: 1_700_000_000_000, sample_trip: 'r1:trip', action: 'dispatch_tick', status: 503 }],
+    ops_list_safety_reports: [
+      { id: 'rider-1:k1', rider_id: 'rider-1', trip_id: 'r1:trip', reporter_id: 'rider-1', reporter_role: 'rider', subject_id: 'd1', subject_role: 'driver', category: 'assault', urgency: 'urgent', note: 'he shouted at me', trip_phase: 'en_route', trip_outcome: null, vehicle_class: 'share', status: 'open', created_at: 2, acknowledged_by: null, acknowledged_at: null, resolved_by: null, resolved_at: null, resolution_code: null, resolution_note: null },
+      { id: 'd1:k2', rider_id: 'rider-1', trip_id: 'r1:trip', reporter_id: 'd1', reporter_role: 'driver', subject_id: 'rider-1', subject_role: 'rider', category: 'harassment', urgency: 'standard', note: 'abusive language', trip_phase: 'arrived', trip_outcome: null, vehicle_class: 'share', status: 'open', created_at: 3, acknowledged_by: null, acknowledged_at: null, resolved_by: null, resolved_at: null, resolution_code: null, resolution_note: null },
+    ],    ops_list_rider_blocks: [{ rider_id: 'rider-9', reason_code: 'abuse', note: 'threats', report_id: null, actor_id: 'ops-2', at: 4 }],
+    ops_get_safety_report_pii: [{ report_id: 'rider-1:k1', pickup_label: '12 Secret Lane', dropoff_label: '1 Airport Rd', driver_name: 'Dee Driver', plate: 'RS-9', lat: -33.87, lng: 151.21, accuracy_m: 8, position_at: 1_700_000_000_000, captured_at: 5 }],
     get_service_status: [{ dispatch_paused: 0 }],
     ops_list_audit: [{ at: 5, action: 'trip_cancelled', actor_id: 'ops-2', rider_id: 'rider-1', trip_id: 'r1:trip', driver_user_id: null, reason_code: 'vehicle_issue', note: 'tow', amount_cents: null }],
   }
@@ -80,7 +85,7 @@ describe('Ops console: access', () => {
     hold('ops')
     mount()
     await screen.findByRole('tablist', { name: 'Console sections' })
-    await waitFor(() => expect(screen.getAllByRole('tab').map((t) => t.textContent?.replace(/\d+$/, ''))).toEqual(['Trips', 'Drivers', 'Disputes', 'Refunds', 'Escalations', 'Audit', 'Health']))
+    await waitFor(() => expect(screen.getAllByRole('tab').map((t) => t.textContent?.replace(/\d+$/, ''))).toEqual(['Trips', 'Drivers', 'Safety', 'Disputes', 'Refunds', 'Escalations', 'Audit', 'Health']))
   })
 })
 
@@ -494,5 +499,114 @@ describe('Ops console: health', () => {
     await userEvent.selectOptions(within(box).getByLabelText('Reason'), 'incident')
     await userEvent.click(within(box).getByRole('button', { name: 'Pause dispatch' }))
     await waitFor(() => expect(toast).toHaveBeenCalledWith({ message: 'That action was refused' }))
+  })
+})
+
+describe('Ops console: safety', () => {
+  beforeEach(() => hold('ops'))
+  const open = async () => {
+    mount()
+    await userEvent.click(await screen.findByRole('tab', { name: 'Safety' }))
+    return screen.findByRole('region', { name: 'Safety' })
+  }
+  const card = (panel: HTMLElement, text: RegExp) => within(panel.querySelectorAll('li')[0].parentElement as HTMLElement).getAllByRole('listitem').find((li) => text.test(li.textContent ?? ''))!
+
+  it('lists reports as the server ordered them, marks urgent ones, and shows no names or addresses', async () => {
+    const panel = await open()
+    const first = panel.querySelectorAll('li')[0]
+    expect(first).toHaveTextContent('Urgent')
+    expect(first).toHaveTextContent('assault')
+    expect(panel).toHaveTextContent('he shouted at me')
+    expect(panel).not.toHaveTextContent(/Secret Lane|Dee Driver|RS-9/)
+    expect(calls('ops_list_safety_reports')[0]).toEqual({ status: null, limit: 100 })
+    expect(panel).toHaveTextContent('rider-9') // blocked riders
+  })
+
+  it('acknowledges a report', async () => {
+    const panel = await open()
+    await userEvent.click(within(card(panel, /assault/)).getByRole('button', { name: 'Acknowledge' }))
+    await waitFor(() => expect(calls('ops_update_safety_report')).toEqual([{ report_id: 'rider-1:k1', status: 'in_review', resolution_code: null, note: null }]))
+  })
+
+  it('resolves only with a resolution and a note', async () => {
+    const panel = await open()
+    const c = card(panel, /assault/)
+    await userEvent.click(within(c).getByRole('button', { name: 'Resolve' }))
+    const form = within(c).getByRole('group', { name: 'Resolve report' })
+    const submit = within(form).getByRole('button', { name: 'Resolve' })
+    expect(submit).toBeDisabled()
+    await userEvent.selectOptions(within(form).getByLabelText('Reason'), 'warned')
+    expect(submit).toBeDisabled()
+    await userEvent.type(within(form).getByLabelText('Note'), 'spoke to the driver')
+    await userEvent.click(submit)
+    await waitFor(() => expect(calls('ops_update_safety_report')).toEqual([{ report_id: 'rider-1:k1', status: 'resolved', resolution_code: 'warned', note: 'spoke to the driver' }]))
+    expect(toast).toHaveBeenCalledWith({ message: 'Report resolved' })
+  })
+
+  it('suspends the reported driver and blocks the reported rider from the report', async () => {
+    const panel = await open()
+    const driverCard = card(panel, /assault/)
+    await userEvent.click(within(driverCard).getByRole('button', { name: 'Suspend driver' }))
+    let form = within(driverCard).getByRole('group', { name: 'Suspend driver' })
+    expect(within(form).getByLabelText('Reason')).toHaveValue('safety')
+    await userEvent.type(within(form).getByLabelText('Note'), 'assault report')
+    await userEvent.click(within(form).getByRole('button', { name: 'Suspend' }))
+    await waitFor(() => expect(calls('ops_suspend_driver')).toEqual([{ driver_user_id: 'd1', reason_code: 'safety', note: 'assault report' }]))
+
+    const riderCard = card(panel, /harassment/)
+    expect(within(riderCard).queryByRole('button', { name: 'Suspend driver' })).not.toBeInTheDocument()
+    await userEvent.click(within(riderCard).getByRole('button', { name: 'Block rider' }))
+    form = within(riderCard).getByRole('group', { name: 'Block rider' })
+    await userEvent.type(within(form).getByLabelText('Note'), 'abuse of a driver')
+    await userEvent.click(within(form).getByRole('button', { name: 'Block' }))
+    await waitFor(() => expect(calls('ops_block_rider')).toEqual([{ rider_user_id: 'rider-1', reason_code: 'safety', note: 'abuse of a driver', report_id: 'd1:k2' }]))
+  })
+
+  it('reveals details only after logging a reason, and coordinates only when asked', async () => {
+    hold('ops', 'ops_pii')
+    const panel = await open()
+    const c = card(panel, /assault/)
+    await userEvent.click(within(c).getByRole('button', { name: 'Show details' }))
+    const show = within(c).getAllByRole('button', { name: 'Show details' }).at(-1)!
+    expect(show).toBeDisabled()
+    await userEvent.selectOptions(within(c).getByLabelText('Why do you need these?'), 'safety_incident')
+    await userEvent.click(show)
+    await waitFor(() => expect(c).toHaveTextContent('12 Secret Lane'))
+    expect(calls('ops_log_access')).toEqual([{ scope: 'trip_pii', rider_id: 'rider-1', trip_id: 'r1:trip', driver_user_id: null, reason_code: 'safety_incident' }])
+    const order = actions.call.mock.calls.map((c) => c[0])
+    expect(order.indexOf('ops_log_access')).toBeLessThan(order.indexOf('ops_get_safety_report_pii'))
+    await userEvent.click(within(c).getByLabelText(/last shared position/))
+    await userEvent.click(within(c).getAllByRole('button', { name: 'Show details' }).at(-1)!)
+    await waitFor(() => expect(calls('ops_log_access').map((l) => (l as { scope: string }).scope)).toEqual(['trip_pii', 'trip_pii', 'evidence']))
+  })
+
+  it('offers no reveal control without ops_pii', async () => {
+    const panel = await open()
+    expect(within(panel).queryByRole('button', { name: 'Show details' })).not.toBeInTheDocument()
+  })
+
+  it('lifts a block with a reason and a note', async () => {
+    const panel = await open()
+    await userEvent.click(within(panel).getByRole('button', { name: 'Lift block' }))
+    const form = within(panel).getByRole('group', { name: 'Lift block' })
+    await userEvent.selectOptions(within(form).getByLabelText('Reason'), 'appeal_upheld')
+    await userEvent.type(within(form).getByLabelText('Note'), 'appeal reviewed')
+    await userEvent.click(within(form).getByRole('button', { name: 'Lift block' }))
+    await waitFor(() => expect(calls('ops_lift_rider_block')).toEqual([{ rider_user_id: 'rider-9', reason_code: 'appeal_upheld', note: 'appeal reviewed' }]))
+  })
+
+  it('shows a refusal rather than hiding it', async () => {
+    const panel = await open()
+    actions.call.mockImplementation(async (name: string) => { if (name === 'ops_update_safety_report') throw new Error('403'); return serve[name] ?? undefined })
+    await userEvent.click(within(card(panel, /assault/)).getByRole('button', { name: 'Acknowledge' }))
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ message: 'That action was refused' }))
+  })
+
+  it('says so when there is nothing open', async () => {
+    serve.ops_list_safety_reports = []
+    serve.ops_list_rider_blocks = []
+    const panel = await open()
+    expect(panel).toHaveTextContent('No open safety reports.')
+    expect(panel).toHaveTextContent('No riders are blocked.')
   })
 })

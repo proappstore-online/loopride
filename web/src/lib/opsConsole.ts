@@ -183,6 +183,51 @@ export const resolveEscalation = (id: string, note: string) => call('ops_resolve
 export interface AuditEntry { at: number; action: string; actor_id: string; rider_id: string | null; trip_id: string | null; driver_user_id: string | null; reason_code: string | null; note: string | null; amount_cents: number | null }
 export const listAudit = (tripId: string, actor: string) => call<AuditEntry[]>('ops_list_audit', { trip_id: tripId.trim() || null, actor: actor.trim() || null, limit: 100 })
 
+// ---- safety reports and rider blocks (issue #12) ----
+export const BLOCK_REASONS: Reason[] = [
+  { code: 'safety', label: 'Safety' },
+  { code: 'abuse', label: 'Abuse' },
+  { code: 'fraud_suspected', label: 'Suspected fraud' },
+  { code: 'other', label: 'Other' },
+]
+export const UNBLOCK_REASONS: Reason[] = [
+  { code: 'review_complete', label: 'Review complete' },
+  { code: 'appeal_upheld', label: 'Appeal upheld' },
+  { code: 'error', label: 'Blocked in error' },
+  { code: 'other', label: 'Other' },
+]
+export const SAFETY_RESOLUTIONS: Reason[] = [
+  { code: 'no_action', label: 'No action needed' },
+  { code: 'warned', label: 'Person warned' },
+  { code: 'driver_suspended', label: 'Driver suspended' },
+  { code: 'rider_blocked', label: 'Rider blocked' },
+  { code: 'referred_externally', label: 'Referred to an outside body' },
+  { code: 'unable_to_substantiate', label: 'Could not substantiate' },
+  { code: 'duplicate', label: 'Duplicate report' },
+]
+export interface SafetyReport {
+  id: string; rider_id: string; trip_id: string; reporter_id: string; reporter_role: 'rider' | 'driver'; subject_id: string | null; subject_role: 'rider' | 'driver' | null
+  category: string; urgency: 'urgent' | 'standard'; note: string | null; trip_phase: string; trip_outcome: string | null; vehicle_class: string | null
+  status: 'open' | 'in_review' | 'resolved'; created_at: number; acknowledged_by: string | null; acknowledged_at: number | null; resolved_by: string | null; resolved_at: number | null; resolution_code: string | null; resolution_note: string | null
+}
+export const listSafetyReports = (status: string | null = null) => call<SafetyReport[]>('ops_list_safety_reports', { status, limit: 100 })
+export const acknowledgeSafetyReport = (id: string) => call('ops_update_safety_report', { report_id: id, status: 'in_review', resolution_code: null, note: null })
+export const resolveSafetyReport = (id: string, resolutionCode: string, note: string) => call('ops_update_safety_report', { report_id: id, status: 'resolved', resolution_code: resolutionCode, note: note.trim() })
+export interface SafetyPii { report_id: string; pickup_label: string | null; dropoff_label: string | null; driver_name: string | null; plate: string | null; lat: number | null; lng: number | null; accuracy_m: number | null; position_at: number | null; captured_at: number }
+/** Logs the reason for names and addresses and for coordinates, then reads the snapshot kept with the report. */
+export async function revealSafetyReport(r: Pick<SafetyReport, 'id' | 'rider_id' | 'trip_id'>, reasonCode: string, withPosition: boolean): Promise<SafetyPii | null> {
+  await call('ops_log_access', { scope: 'trip_pii', rider_id: r.rider_id, trip_id: r.trip_id, driver_user_id: null, reason_code: reasonCode })
+  if (withPosition) await call('ops_log_access', { scope: 'evidence', rider_id: r.rider_id, trip_id: r.trip_id, driver_user_id: null, reason_code: reasonCode })
+  const [row] = await call<SafetyPii[]>('ops_get_safety_report_pii', { report_id: r.id })
+  return row ?? null
+}
+export interface RiderBlock { rider_id: string; reason_code: string; note: string; report_id: string | null; actor_id: string; at: number }
+export const listRiderBlocks = () => call<RiderBlock[]>('ops_list_rider_blocks', { limit: 100 })
+export const blockRider = (riderUserId: string, reasonCode: string, note: string, reportId: string | null) =>
+  call('ops_block_rider', { rider_user_id: riderUserId, reason_code: reasonCode, note: note.trim(), report_id: reportId })
+export const liftRiderBlock = (riderUserId: string, reasonCode: string, note: string) =>
+  call('ops_lift_rider_block', { rider_user_id: riderUserId, reason_code: reasonCode, note: note.trim() })
+
 // ---- health ----
 export interface HealthAlert { code: string; domain: string; severity: 'critical' | 'warning'; firing: number; value: number; threshold: string; message: string; runbook: string }
 export interface HealthMetric { domain: string; calls: number; errors: number; slow: number; avg_latency_ms: number; people: number; gauge_a: number | null; gauge_b: number | null }

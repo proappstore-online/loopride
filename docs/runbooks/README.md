@@ -42,6 +42,7 @@ link to the runbook.
 | `notification_failures` | warning | at least 5 pushes or emails failed after all retries | [notification outage](notification-outage.md) |
 | `notifications_undelivered` | warning | at least 10 notifications still undelivered after 10 minutes | [notification outage](notification-outage.md) |
 | `payment_records` | critical | a finished trip has no fare statement, a statement is not its quote, or credits exceed the amount | [rollback](rollback.md#payments) |
+| `safety_unacknowledged` | critical | at least one urgent safety report has been open and unacknowledged for 5 minutes | [safety incident](safety-incident.md) |
 | `<domain>_error_rate` for request, dispatch, tracking, notification, payment, maps | warning | at least 20 calls in the window and at least 10% failed | the matching runbook |
 
 Inconsistent states (`ops_health_invariants`): a completed trip whose ride is not completed; a cancelled
@@ -59,7 +60,7 @@ alerts; wiring that needs a server-side sender and a service identity, neither o
 
 ## Who does what
 
-- **Operations (`ops` role)**: Health tab, pause/resume dispatch, cancel trips, escalate.
+- **Operations (`ops` role)**: Health tab, pause/resume dispatch, cancel trips, escalate, answer safety reports, suspend drivers and block riders.
 - **App owner**: grants roles, owns deploys and rollbacks, reads the PAS console logs, and is the
   escalation point when an incident is a platform problem.
 - Every action above is audited.

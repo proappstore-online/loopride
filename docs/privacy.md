@@ -56,6 +56,9 @@ question is not listed below.
 | `driver_review_log` | Approval, rejection, suspension decisions with reasons | Audit of driver decisions | Kept after deletion (audit) | `list_my_driver_review_log` | Kept (audit) ⚠ needs-human |
 | `ops_access_log` | Who looked at personal data, which scope, and why | Accountability for staff access | Kept after deletion (audit) | Not exported: Staff accountability record; whether a person is entitled to see who accessed their data is a legal question | Kept (audit) ⚠ needs-human |
 | `ops_escalations` | Escalations with staff notes | Safety, legal and fraud escalation | Kept after deletion (audit) | Not exported: Staff working records; whether they fall inside a subject-access request is a legal question | Kept (audit) ⚠ needs-human |
+| `safety_reports` | Safety reports about the other person on a trip: category, urgency, the reporter's note, trip phase and outcome, staff review and resolution | Safety review, protecting riders and drivers, and proof of how a report was handled | Kept after deletion (audit) | `list_my_safety_reports` | Kept (audit) ⚠ needs-human |
+| `safety_report_snapshots` | The addresses, driver name, plate and the driver's last shared position as they were when a safety report was filed | Let staff review a safety report after the live trip data is gone | Safety report snapshots: 30 days | Not exported: A copy of trip addresses and the driver's position taken for staff review; whether a subject-access request must include it is a legal question | `delete_my_rider_data` ⚠ needs-human |
+| `rider_block_log` | Every time staff blocked or unblocked a rider, with the reason, note and who did it | Enforce a block so it survives deleting and recreating the account, and account for staff decisions | Kept after deletion (audit) | Not exported: Staff decision record; whether a person is entitled to see or contest a block is a legal question | Kept (audit) ⚠ needs-human |
 | `service_flag_log` | Who paused or resumed dispatch, and why | Audit of the dispatch switch | Kept after deletion (audit) | Not exported: Holds only staff actions, no rider or driver data | Kept (audit) |
 | `kv:rides.v1` | Synced copy of the rider's rides | Keep rides across devices | Until account deletion | Not exported: The same rides are exported from ride_requests | `delete_my_rider_data` |
 | `device:loopride.rides.v2` | Rides stored in this browser, including those made signed out | Ride history without an account | Until account deletion | `onThisDevice.rides` | Cleared by the app |
@@ -105,10 +108,11 @@ plain language. They are not legal terms.
 | Live trip position (`trip_locations`) | Deleted when the trip ends, however it ends; 24 hours at the latest | trip-ending actions (#8), `purge_expired_data`, withdrawal |
 | Driver dispatch position (`driver_locations`) | Deleted when the driver goes offline or withdraws; 24 hours at the latest | `set_driver_availability`, `set_location_consent`, `purge_expired_data` |
 | Trip evidence (`trip_evidence`) | 30 days | `purge_expired_data` |
+| Safety report snapshots (`safety_report_snapshots`) | 30 days | `purge_expired_data` |
 | Notifications (`notifications`) | 30 days | `purge_expired_data`, `mark_notifications_read` |
 | Diagnostic events and counters (`client_events`, `client_metrics`) | 14 days | `purge_expired_data`, `report_client_event` |
 | Everything else about a person | Until they delete their account | `delete_my_rider_data`, `delete_my_driver_data` |
-| Staff audit records (`driver_review_log`, `ops_access_log`, `ops_escalations`, `service_flag_log`) | Kept after deletion | not deleted; see below |
+| Staff audit records (`driver_review_log`, `ops_access_log`, `ops_escalations`, `safety_reports`, `rider_block_log`, `service_flag_log`) | Kept after deletion | not deleted; see below |
 
 `purge_expired_data` deletes expired rows for everyone. Any signed-in client calls it at most every six
 hours (`runRetention` in `web/src/lib/privacy.ts`, called from `web/src/App.tsx`), and several actions already purge as they run, so expiry does
@@ -164,6 +168,9 @@ existed for each, and the test fails if one is added to the inventory without be
 - `driver_review_log`: Documented in docs/domain-model.md as kept for audit. Open: the period, and whether a driver may have the reasons erased.
 - `ops_access_log`: Open: how long the access log is kept, and whether an erased person is entitled to see who accessed their data. Today it holds ids, scope and reason code, not trip content.
 - `ops_escalations`: Open: how long escalations are kept after the person is erased. Free-text staff notes can contain personal data (docs/domain-model.md known gaps).
+- `safety_reports`: Open: how long safety reports are kept, and whether the person reported about may see the report or contest it. Reports are kept after the reporter's account is erased so a report about someone else is not lost (docs/safety.md).
+- `safety_report_snapshots`: Open: whether 30 days is right for safety reviews, and whether the snapshot belongs in a subject-access export. Reports referred to authorities may need a longer hold (docs/safety.md).
+- `rider_block_log`: Open: how long a block record is kept, whether it may outlive the account, and what appeal route a blocked rider must be offered (docs/safety.md).
 
 Cross-cutting questions:
 

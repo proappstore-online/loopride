@@ -284,4 +284,26 @@ describe('DriverTrip', () => {
       }
     })
   })
+
+  describe('safety', () => {
+    it.each(['scheduled', 'en_route', 'arrived', 'in_progress'])('offers the driver a Safety button with emergency guidance while the trip is %s', async (phase) => {
+      current.trip = trip({ phase })
+      mount()
+      await userEvent.click(await screen.findByRole('button', { name: 'Safety' }))
+      const panel = screen.getByRole('group', { name: 'Safety' })
+      expect(panel).toHaveTextContent(/contact your local emergency services now/)
+      expect(screen.getByLabelText('What happened with the rider?')).toBeInTheDocument()
+    })
+
+    it('is available after the trip for a week only', async () => {
+      current.trip = trip({ phase: 'completed', endedAt: Date.now() - 2 * 86_400_000 })
+      const first = mount()
+      expect(await screen.findByRole('button', { name: 'Safety' })).toBeInTheDocument()
+      first.unmount()
+      current.trip = trip({ phase: 'completed', endedAt: Date.now() - 9 * 86_400_000 })
+      mount()
+      await screen.findByRole('button', { name: 'Report a problem' })
+      expect(screen.queryByRole('button', { name: 'Safety' })).not.toBeInTheDocument()
+    })
+  })
 })

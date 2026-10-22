@@ -500,6 +500,8 @@ characters).
 | Request a refund (`ops_request_refund`) | overcharged, service_failure, duplicate_charge, cancel_fee_dispute, other | **a second person decides** (`ops_decide_refund`); records the decision only, no money moves while payments are not enabled (ADR 0001) |
 | Escalate (`ops_escalate`) | safety, legal_request, fraud, abuse, regulator_or_press, other | to lead, safety or legal; **someone else resolves it** |
 | Resolve a dispute | decision and note, optional fee waiver | (from #7) |
+| Answer a safety report (`ops_update_safety_report`) | in_review; resolved with no_action, warned, driver_suspended, rider_blocked, referred_externally, unable_to_substantiate, duplicate | note required to resolve; resolving closes the linked safety escalation; not for reports you are part of (issue #12, [safety](safety.md)) |
+| Block / lift a rider (`ops_block_rider`, `ops_lift_rider_block`) | safety, abuse, fraud_suspected, other / review_complete, appeal_upheld, error, other | refuses new requests and quote acceptances, withdraws offers; a trip under way is untouched; survives account deletion |
 
 Staff cannot act on their own application, suspension, trips, or requests they made, and
 retried submissions are ignored through request keys.

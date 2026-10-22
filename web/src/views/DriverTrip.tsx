@@ -23,6 +23,8 @@ import { loadEarnings, money, type Earning } from '../lib/receipts'
 import { reportError } from '../lib/telemetry'
 import LocationConsent from '../components/LocationConsent'
 import { useLocationConsent } from '../lib/useLocationConsent'
+import { canReportSafety } from '../lib/safety'
+import SafetyPanel from '../components/SafetyPanel'
 
 const TripMap = lazy(() => import('./TripMap'))
 
@@ -45,7 +47,7 @@ export default function DriverTrip({ riderId, rideId }: Props) {
   const [, setLocation] = useLocation()
   const tripId = `${rideId}:trip`
   const [trip, setTrip] = useState<DriverTripState | null | undefined>(undefined)
-  const [panel, setPanel] = useState<'cancel' | 'dispute' | null>(null)
+  const [panel, setPanel] = useState<'cancel' | 'dispute' | 'safety' | null>(null)
   const [busy, setBusy] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [position, setPosition] = useState<LatLng | null>(null)
@@ -230,6 +232,9 @@ export default function DriverTrip({ riderId, rideId }: Props) {
           {(phase === 'scheduled' || phase === 'en_route' || phase === 'arrived') && panel !== 'cancel' && (
             <button onClick={() => setPanel('cancel')} className="rounded-2xl border border-[var(--line)] px-5 py-2 text-sm font-semibold text-[var(--error)]">Cancel trip</button>
           )}
+          {canReportSafety(trip, now) && panel !== 'safety' && (
+            <button onClick={() => setPanel('safety')} className="rounded-2xl border border-[var(--error)] px-5 py-2 text-sm font-semibold text-[var(--error)]">Safety</button>
+          )}
           {phase && isFinished(phase) && !trip.disputed && panel !== 'dispute' && (
             <button onClick={() => setPanel('dispute')} className="rounded-2xl border border-[var(--line)] px-5 py-2 text-sm font-semibold text-[var(--ink)]">Report a problem</button>
           )}
@@ -253,6 +258,7 @@ export default function DriverTrip({ riderId, rideId }: Props) {
             }}
           />
         )}
+        {panel === 'safety' && <SafetyPanel riderId={riderId} tripId={tripId} role="driver" onClose={() => setPanel(null)} />}
         {panel === 'dispute' && (
           <ReasonPanel
             label="Report a problem"
