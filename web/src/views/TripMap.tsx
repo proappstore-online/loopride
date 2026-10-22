@@ -18,6 +18,8 @@ interface TripMapProps {
   routePolyline?: [number, number][]
   /** Called with freshly-fetched polyline so the parent can persist it. */
   onRouteFetched?: (coordinates: [number, number][]) => void
+  /** Spoken description of the map; the same facts are listed as text next to it. */
+  label?: string
 }
 
 const OSM_STYLE = {
@@ -70,6 +72,7 @@ export default function TripMap({
   approach,
   routePolyline,
   onRouteFetched,
+  label,
 }: TripMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<MapLibreMap | null>(null)
@@ -247,7 +250,7 @@ export default function TripMap({
 
   if (!pickup || !dropoff) {
     return (
-      <div className="flex h-64 items-center justify-center rounded-3xl border border-[var(--line)] bg-[var(--accent-soft)] text-xs text-[var(--muted)]">
+      <div role="note" className="flex h-64 items-center justify-center rounded-3xl border border-[var(--line)] bg-[var(--accent-soft)] text-xs text-[var(--muted)]">
         Location coordinates missing — recreate the ride to enable the map.
       </div>
     )
@@ -257,6 +260,8 @@ export default function TripMap({
     <div className="relative">
       <div
         ref={containerRef}
+        role="region"
+        aria-label={label ?? 'Map of the route'}
         className="h-72 w-full overflow-hidden rounded-3xl border border-[var(--line)]"
       />
       {!routeIsReal && (

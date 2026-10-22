@@ -109,3 +109,38 @@ describe('safety documentation (issue #12)', () => {
     expect(safety.replace(/\n> ?/g, ' ').replace(/\s+/g, ' ')).toContain('If you are in immediate danger, contact your local emergency services now. Do not wait for a reply from us.')
   })
 })
+
+describe('accessibility documentation and mobile guards (issue #14)', () => {
+  const doc = read('accessibility.md')
+  const root = join(DOCS, '..')
+  const css = readFileSync(join(root, 'web', 'src', 'index.css'), 'utf8')
+  const html = readFileSync(join(root, 'web', 'index.html'), 'utf8')
+  const workflow = readFileSync(join(root, '.github', 'workflows', 'test.yml'), 'utf8')
+
+  it('has a manual mobile checklist covering request, tracking, cancellation and driver acceptance', () => {
+    expect(doc).toContain('## Manual mobile checklist')
+    expect(doc.match(/- \[ \]/g)!.length).toBeGreaterThanOrEqual(20)
+    for (const topic of ['### Request a ride', '### Track and cancel', '### Driver', 'VoiceOver', 'TalkBack', '200%']) expect(doc, topic).toContain(topic)
+  })
+
+  it('the automated checks it describes are in CI', () => {
+    expect(workflow).toContain('pnpm test')
+    expect(workflow).toContain('pnpm test:e2e')
+    expect(existsSync(join(root, 'web', 'e2e', 'accessibility.spec.ts'))).toBe(true)
+    expect(existsSync(join(root, 'web', 'test', 'axe.ts'))).toBe(true)
+  })
+
+  it('never turns off pinch zoom', () => {
+    const viewport = /<meta name="viewport" content="([^"]*)"/.exec(html)![1]
+    expect(viewport).not.toMatch(/user-scalable\s*=\s*(no|0)/)
+    expect(viewport).not.toMatch(/maximum-scale/)
+    expect(viewport).toContain('width=device-width')
+  })
+
+  it('keeps the 44 px touch target, focus ring, skip link and reduced-motion rules', () => {
+    expect(css).toMatch(/button[^{]*\{ min-height: 44px; \}/)
+    expect(css).toContain(':focus-visible')
+    expect(css).toContain('.skip-link')
+    expect(css).toContain('prefers-reduced-motion')
+  })
+})

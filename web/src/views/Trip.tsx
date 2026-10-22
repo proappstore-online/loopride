@@ -4,7 +4,7 @@ import type { LatLng, RecurringRide } from '../types'
 import { DAYS } from '../types'
 import { getRide, saveRide } from '../storage'
 import { ageNow, trackDriver, type DriverLocation } from '../lib/tracking'
-import { computeEta, etaTarget, etaTrusted, formatEta, freshness, shouldRecompute, type Eta } from '../lib/eta'
+import { computeEta, etaTarget, etaTrusted, formatEta, freshness, locationSummary, shouldRecompute, type Eta } from '../lib/eta'
 import { runDispatch, startDispatch, type DispatchStatus } from '../lib/dispatch'
 import {
   OUTCOME_TEXT,
@@ -27,6 +27,7 @@ import ReceiptCard from '../components/ReceiptCard'
 import { reportError } from '../lib/telemetry'
 import { canReportSafety } from '../lib/safety'
 import SafetyPanel from '../components/SafetyPanel'
+import MapAlternative from '../components/MapAlternative'
 
 const TripMap = lazy(() => import('./TripMap'))
 
@@ -180,6 +181,8 @@ export default function Trip({ rideId }: TripProps) {
   const searching = managed && !trip && (dispatch === null || dispatch.state === 'searching')
   const cancellable = managed && ((trip && canRiderCancel(trip.phase)) || searching)
 
+  const etaText = !loc ? 'Waiting for your driver’s location…' : !trusted ? 'ETA paused: the driver’s location is out of date.' : eta ? `${eta.approximate ? 'About ' : ''}${formatEta(eta.seconds)}${phase === 'in_progress' ? ' to your destination' : ' until pickup'}${eta.approximate ? ' (approximate)' : ''}` : 'Calculating ETA…'
+
   const headline = (() => {
     if (!managed) {
       if (ride.bookingType === 'scheduled') return `Reserved for ${ride.scheduledFor ? new Date(ride.scheduledFor).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : ride.time}`
@@ -210,11 +213,24 @@ export default function Trip({ rideId }: TripProps) {
 
       <section className="mb-4">
         <Suspense fallback={<div className="flex h-72 items-center justify-center rounded-3xl border border-[var(--line)] bg-[var(--accent-soft)] text-xs text-[var(--muted)]">Loading map…</div>}>
-          <TripMap pickup={ride.pickupCoord} dropoff={ride.dropoffCoord} driver={driverPosition} approach={trusted && eta?.polyline ? eta.polyline : undefined} routePolyline={ride.routePolyline} onRouteFetched={(coords) => saveRide({ ...ride, routePolyline: coords })} />
+          <TripMap label={`Map of the route from ${ride.pickup} to ${ride.dropoff}. The same details are listed below as text.`} pickup={ride.pickupCoord} dropoff={ride.dropoffCoord} driver={driverPosition} approach={trusted && eta?.polyline ? eta.polyline : undefined} routePolyline={ride.routePolyline} onRouteFetched={(coords) => saveRide({ ...ride, routePolyline: coords })} />
         </Suspense>
       </section>
 
-      <section className="rounded-3xl border border-[var(--line)] p-6">
+      <MapAlternative
+        rows={[
+          { label: 'Pickup', value: ride.pickup },
+          { label: 'Drop-off', value: ride.dropoff },
+          ...(managed
+            ? [
+                { label: 'Driver', value: dispatch?.driverName ? `${dispatch.driverName}${dispatch.plate ? `, ${dispatch.plate}` : ''}` : 'Not assigned yet' },
+                ...(tracking ? [{ label: 'Driver location', value: locationSummary(fresh, ageSec) }, ...(phase !== 'arrived' ? [{ label: 'ETA', value: etaText }] : [])] : []),
+              ]
+            : []),
+        ]}
+      />
+
+      <section className="mt-4 rounded-3xl border border-[var(--line)] p-6">
         <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Route</p>
         <p className="mt-1 text-sm font-semibold text-[var(--ink)]">{ride.pickup} → {ride.dropoff}</p>
         <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">{ride.bookingType === 'recurring' ? 'Routine' : 'Ride option'}</p>
@@ -236,10 +252,10 @@ export default function Trip({ rideId }: TripProps) {
           <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Status</p>
           {tracking && <FreshnessBadge state={fresh} ageSec={ageSec} />}
         </div>
-        <p className="mt-1 display-font text-2xl font-semibold text-[var(--ink)]">{headline}</p>
+        <p aria-live="polite" className="mt-1 display-font text-2xl font-semibold text-[var(--ink)]">{headline}</p>
         {tracking && phase !== 'arrived' && (
           <p role="status" aria-label="ETA" className="mt-2 text-sm font-semibold text-[var(--ink)]">
-            {!loc ? 'Waiting for your driver’s location…' : !trusted ? 'ETA paused: the driver’s location is out of date.' : eta ? `${eta.approximate ? 'About ' : ''}${formatEta(eta.seconds)}${phase === 'in_progress' ? ' to your destination' : ' until pickup'}${eta.approximate ? ' (approximate)' : ''}` : 'Calculating ETA…'}
+            {etaText}
           </p>
         )}
         {trip && trip.phase === 'cancelled' && (

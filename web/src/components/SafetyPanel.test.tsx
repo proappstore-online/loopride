@@ -7,6 +7,7 @@ vi.mock('../lib/app', () => ({ app: { actions } }))
 vi.mock('../lib/toast', () => ({ showToast: toast }))
 
 import SafetyPanel from './SafetyPanel'
+import { expectNoA11yViolations } from '../../test/axe'
 import { SAFETY_COPY } from '../lib/safety'
 
 let recorded: boolean
@@ -87,4 +88,14 @@ describe('SafetyPanel', () => {
     await waitFor(() => expect(toast).toHaveBeenCalled())
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
+
+  it('has no accessibility violations before and after sending', async () => {
+    const { container } = render(<SafetyPanel riderId="rider-1" tripId="r1:trip" role="rider" onClose={vi.fn()} />)
+    await expectNoA11yViolations(container)
+    await userEvent.selectOptions(screen.getByLabelText(/What happened/), 'other')
+    await userEvent.click(screen.getByRole('button', { name: 'Send safety report' }))
+    await screen.findByRole('status')
+    await expectNoA11yViolations(container)
+  })
+
 })

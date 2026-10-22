@@ -57,6 +57,7 @@ import Trip from './Trip'
 import { saveRide } from '../storage'
 import type { RecurringRide } from '../types'
 import { renderWithRouter } from '../../test/router'
+import { expectNoA11yViolations } from '../../test/axe'
 
 const legacy: RecurringRide = { id: 'ride-old', pickup: 'A', pickupCoord: { lat: 0, lng: 0 }, dropoff: 'B', dropoffCoord: { lat: 1, lng: 1 }, days: [], time: '08:00', driverName: 'Jordan', paused: false, createdAt: 1, bookingType: 'now', vehicle: 'comfort', fareCents: 1711, etaMinutes: 5, driverPlate: 'RS-482', driverRating: 4.9 }
 const live: RecurringRide = { ...legacy, id: 'ride-live', driverName: '', driverPlate: undefined, driverRating: undefined, quoteId: 'q1' }
@@ -153,10 +154,35 @@ describe('Trip: server-driven rides', () => {
     for (const [phase, cancellable] of [['en_route', true], ['arrived', true], ['in_progress', false], ['completed', false]] as const) {
       tripState.current = lifecycle({ phase })
       const { unmount } = mount('ride-live')
-      await screen.findByText(/Dana|On your way|Trip completed/)
+      await screen.findByText(/^(Dana is on the way|Dana has arrived|On your way|Trip completed)$/)
       await waitFor(() => expect(Boolean(screen.queryByRole('button', { name: 'Cancel ride' }))).toBe(cancellable))
       unmount()
     }
+  })
+
+  it('has no accessibility violations while the driver is on the way, and describes the map in text', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'en_route' })
+    track.loc = located(1000)
+    route.fn.mockResolvedValue({ coordinates: [[0.5, 0.5], [1, 1]], distanceMeters: 1000, durationSeconds: 420 })
+    const { container } = mount('ride-live')
+    await screen.findByRole('button', { name: 'Cancel ride' })
+    const details = await screen.findByRole('region', { name: 'Route details' })
+    expect(details).toHaveTextContent(/PickupA/)
+    expect(details).toHaveTextContent(/Drop-offB/)
+    expect(details).toHaveTextContent(/DriverDana, RS-9/)
+    expect(details).toHaveTextContent(/Driver locationLive/)
+    await waitFor(() => expect(details).toHaveTextContent(/ETA.*until pickup/))
+    expect(screen.getByTestId('trip-map').getAttribute('data-driver')).toBe('0.5,0.5')
+    await expectNoA11yViolations(container)
+  })
+
+  it('announces the status headline politely and labels the map', async () => {
+    dispatchState.current = matchedDispatch
+    tripState.current = lifecycle({ phase: 'arrived' })
+    mount('ride-live')
+    const headline = await screen.findByText('Dana has arrived')
+    expect(headline).toHaveAttribute('aria-live', 'polite')
   })
 
   it('shows the fee before cancelling, then cancels with the chosen reason', async () => {
@@ -260,7 +286,7 @@ describe('Trip: server-driven rides', () => {
     mount('ride-live')
     expect(await screen.findByText(/Live · \d+s ago/)).toBeInTheDocument()
     expect(screen.getByTestId('trip-map').dataset.driver).toBe('0.5,0.5')
-    expect(await screen.findByText('7 min until pickup')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('status', { name: 'ETA' })).toHaveTextContent('7 min until pickup'))
     expect(route.fn).toHaveBeenCalledWith({ lat: 0.5, lng: 0.5 }, { lat: 0, lng: 0 }, undefined)
   })
 
@@ -269,7 +295,7 @@ describe('Trip: server-driven rides', () => {
     tripState.current = lifecycle({ phase: 'in_progress' })
     track.loc = located(2000, { tripStatus: 'arrived' })
     mount('ride-live')
-    expect(await screen.findByText('7 min to your destination')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('status', { name: 'ETA' })).toHaveTextContent('7 min to your destination'))
     expect(route.fn).toHaveBeenCalledWith({ lat: 0.5, lng: 0.5 }, { lat: 1, lng: 1 }, undefined)
   })
 
@@ -279,7 +305,7 @@ describe('Trip: server-driven rides', () => {
     track.loc = located(1000)
     route.fn.mockRejectedValue(new Error('down'))
     mount('ride-live')
-    expect(await screen.findByText(/About .* until pickup \(approximate\)/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('status', { name: 'ETA' })).toHaveTextContent(/About .* until pickup \(approximate\)/))
   })
 
   it('marks a delayed feed and still shows the ETA', async () => {
@@ -288,7 +314,7 @@ describe('Trip: server-driven rides', () => {
     track.loc = located(40_000)
     mount('ride-live')
     expect(await screen.findByText(/Delayed · \d+s ago/)).toBeInTheDocument()
-    expect(await screen.findByText('7 min until pickup')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('status', { name: 'ETA' })).toHaveTextContent('7 min until pickup'))
   })
 
   it('does not derive an ETA from a stale location, and says so', async () => {
@@ -297,7 +323,7 @@ describe('Trip: server-driven rides', () => {
     track.loc = located(3 * 60_000)
     mount('ride-live')
     expect(await screen.findByText(/Last seen 3 min ago/)).toBeInTheDocument()
-    expect(screen.getByText(/ETA paused/)).toBeInTheDocument()
+    expect(screen.getByRole('status', { name: 'ETA' })).toHaveTextContent(/ETA paused/)
     expect(screen.getByTestId('trip-map').dataset.driver).toBe('0.5,0.5') // last known position stays on the map
     expect(route.fn).not.toHaveBeenCalled()
   })
@@ -316,8 +342,8 @@ describe('Trip: server-driven rides', () => {
     dispatchState.current = matchedDispatch
     tripState.current = lifecycle({ phase: 'en_route' })
     mount('ride-live')
-    expect(await screen.findByText('No live location yet')).toBeInTheDocument()
-    expect(screen.getByText(/Waiting for your driver/)).toBeInTheDocument()
+    expect(await screen.findAllByText('No live location yet')).not.toHaveLength(0)
+    expect(screen.getByRole('status', { name: 'ETA' })).toHaveTextContent(/Waiting for your driver/)
   })
 
   it('does not track before the driver starts driving, once they have arrived, or after the trip ends', async () => {

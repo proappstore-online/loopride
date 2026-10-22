@@ -34,6 +34,7 @@ vi.mock('../lib/receipts', async (importOriginal) => ({ ...(await importOriginal
 
 import DriverTrip from './DriverTrip'
 import { renderWithRouter } from '../../test/router'
+import { expectNoA11yViolations } from '../../test/axe'
 
 const trip = (extra: Record<string, unknown> = {}) => ({ tripId: 'r1:trip', requestId: 'r1', phase: 'scheduled', startedAt: null, endedAt: null, outcome: null, cancelledByRole: null, cancelCode: null, cancelFeeCents: 0, feePolicy: null, assignedAt: 1, arrivedAt: null, disputed: false, pickup: 'Central', dropoff: 'Airport', pickupCoord: { lat: 0, lng: 0 }, dropoffCoord: { lat: 1, lng: 1 }, ...extra })
 const mount = () => render(renderWithRouter(<DriverTrip riderId="rider-1" rideId="r1" />, '/driver/trip/rider-1/r1').ui)
@@ -306,4 +307,22 @@ describe('DriverTrip', () => {
       expect(screen.queryByRole('button', { name: 'Safety' })).not.toBeInTheDocument()
     })
   })
+
+  describe('accessibility', () => {
+    it.each(['scheduled', 'en_route', 'arrived', 'in_progress', 'completed'])('has no axe violations in %s and lists the route as text', async (phase) => {
+      current.trip = trip({ phase })
+      const { container } = mount()
+      const details = await screen.findByRole('region', { name: 'Route details' })
+      expect(details).toHaveTextContent(/Pickup/)
+      expect(details).toHaveTextContent(/Drop-off/)
+      await expectNoA11yViolations(container)
+    })
+
+    it('announces the status headline politely', async () => {
+      current.trip = trip({ phase: 'en_route' })
+      mount()
+      expect(await screen.findByText('Driving to pickup')).toHaveAttribute('aria-live', 'polite')
+    })
+  })
+
 })

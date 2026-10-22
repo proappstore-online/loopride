@@ -32,12 +32,12 @@ export default function Home() {
   return (
     <div className="mx-auto min-h-[100dvh] max-w-2xl px-4 pb-10 pt-5 sm:px-6">
       <header className="mb-7">
-        <div className="mb-7 flex items-center justify-between gap-3">
+        <div className="mb-7 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <span className="grid h-9 w-9 place-items-center rounded-xl bg-[var(--accent)] text-lg text-white">↗</span>
+            <span aria-hidden="true" className="grid h-9 w-9 place-items-center rounded-xl bg-[var(--accent)] text-lg text-white">↗</span>
             <h1 className="text-xl font-extrabold tracking-[-0.06em] text-[var(--ink)]">RideShare</h1>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <AuthChip loading={auth.loading} user={auth.user} onSignIn={(provider) => app.auth.signIn(provider)} onSignOut={auth.signOut} />
             <NotificationBell signedIn={Boolean(auth.user)} />
             <button onClick={() => setLocation('/account')} className="rounded-full border border-[var(--line)] px-3 py-1 text-xs font-semibold text-[var(--ink)] hover:bg-[var(--accent-soft)]">Account</button>
@@ -46,13 +46,13 @@ export default function Home() {
         </div>
 
         <button onClick={() => setLocation('/new')} className="group flex w-full items-center gap-4 rounded-2xl bg-[var(--ink)] px-5 py-5 text-left text-white shadow-sm transition-transform hover:-translate-y-0.5">
-          <span className="grid h-9 w-9 place-items-center rounded-full bg-white/15 text-xl">⌕</span>
+          <span aria-hidden="true" className="grid h-9 w-9 place-items-center rounded-full bg-white/15 text-xl">⌕</span>
           <span><span className="block text-base font-bold">Where to?</span><span className="mt-0.5 block text-xs text-white/65">Request a ride now</span></span>
-          <span className="ml-auto text-white/60">→</span>
+          <span aria-hidden="true" className="ml-auto text-white/60">→</span>
         </button>
         <div className="mt-3 grid grid-cols-2 gap-3">
-          <button onClick={() => setLocation('/new?when=later')} className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] px-4 py-3 text-left text-sm font-bold text-[var(--ink)] hover:bg-[var(--accent-soft)]"><span className="mr-2">◷</span> Reserve later</button>
-          <button onClick={() => setLocation('/new?when=repeat')} className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] px-4 py-3 text-left text-sm font-bold text-[var(--ink)] hover:bg-[var(--accent-soft)]"><span className="mr-2">↻</span> Set a routine</button>
+          <button onClick={() => setLocation('/new?when=later')} className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] px-4 py-3 text-left text-sm font-bold text-[var(--ink)] hover:bg-[var(--accent-soft)]"><span aria-hidden="true" className="mr-2">◷</span> Reserve later</button>
+          <button onClick={() => setLocation('/new?when=repeat')} className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] px-4 py-3 text-left text-sm font-bold text-[var(--ink)] hover:bg-[var(--accent-soft)]"><span aria-hidden="true" className="mr-2">↻</span> Set a routine</button>
         </div>
       </header>
 
@@ -72,7 +72,7 @@ export default function Home() {
 
 function RideCard({ ride, onOpen, onCancel }: { ride: RecurringRide; onOpen: () => void; onCancel: () => void }) {
   return <li className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4 shadow-[0_5px_24px_rgba(12,34,27,0.03)]">
-    <button onClick={onOpen} className="block w-full text-left"><div className="flex gap-3"><div className="mt-1 flex flex-col items-center"><span className="h-2.5 w-2.5 rounded-full border-2 border-[var(--accent)]" /><span className="h-5 border-l border-dashed border-[var(--muted)]" /><span className="h-2.5 w-2.5 rounded-sm bg-[var(--ink)]" /></div><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-[var(--ink)]">{ride.dropoff}</p><p className="mt-1 truncate text-xs text-[var(--muted)]">From {ride.pickup}</p><p className="mt-2 text-xs font-semibold text-[var(--accent)]">{rideLabel(ride)}</p></div>{ride.fareCents && <p className="text-sm font-bold text-[var(--ink)]">${(ride.fareCents / 100).toFixed(2)}</p>}</div></button>
+    <button onClick={onOpen} className="block w-full text-left"><div className="flex gap-3"><div className="mt-1 flex flex-col items-center"><span aria-hidden="true" className="h-2.5 w-2.5 rounded-full border-2 border-[var(--accent)]" /><span aria-hidden="true" className="h-5 border-l border-dashed border-[var(--muted)]" /><span aria-hidden="true" className="h-2.5 w-2.5 rounded-sm bg-[var(--ink)]" /></div><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-[var(--ink)]">{ride.dropoff}</p><p className="mt-1 truncate text-xs text-[var(--muted)]">From {ride.pickup}</p><p className="mt-2 text-xs font-semibold text-[var(--accent)]">{rideLabel(ride)}</p></div>{ride.fareCents && <p className="text-sm font-bold text-[var(--ink)]">${(ride.fareCents / 100).toFixed(2)}</p>}</div></button>
     <button onClick={onCancel} className="mt-3 text-xs font-bold text-[var(--error)] hover:underline">{ride.quoteId ? 'Manage ride' : 'Cancel ride'}</button>
   </li>
 }

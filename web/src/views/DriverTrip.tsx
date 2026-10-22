@@ -25,6 +25,7 @@ import LocationConsent from '../components/LocationConsent'
 import { useLocationConsent } from '../lib/useLocationConsent'
 import { canReportSafety } from '../lib/safety'
 import SafetyPanel from '../components/SafetyPanel'
+import MapAlternative from '../components/MapAlternative'
 
 const TripMap = lazy(() => import('./TripMap'))
 
@@ -170,11 +171,19 @@ export default function DriverTrip({ riderId, rideId }: Props) {
 
       <section className="mb-4">
         <Suspense fallback={<div className="flex h-72 items-center justify-center rounded-3xl border border-[var(--line)] bg-[var(--accent-soft)] text-xs text-[var(--muted)]">Loading map…</div>}>
-          <TripMap pickup={trip.pickupCoord} dropoff={trip.dropoffCoord} driver={driving ? position : null} />
+          <TripMap label={`Map of the trip from ${trip.pickup} to ${trip.dropoff}. The same details are listed below as text.`} pickup={trip.pickupCoord} dropoff={trip.dropoffCoord} driver={driving ? position : null} />
         </Suspense>
       </section>
 
-      <section className="rounded-3xl border border-[var(--line)] p-6">
+      <MapAlternative
+        rows={[
+          { label: 'Pickup', value: trip.pickup ?? 'Not available' },
+          { label: 'Drop-off', value: trip.dropoff ?? 'Not available' },
+          ...(driving ? [{ label: 'Your location', value: sharing ? (position ? 'Being shared with the rider' : 'Waiting for a location fix') : 'Not being shared' }] : []),
+        ]}
+      />
+
+      <section className="mt-4 rounded-3xl border border-[var(--line)] p-6">
         <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Trip</p>
         <p className="mt-1 text-sm font-semibold text-[var(--ink)]">{trip.pickup} → {trip.dropoff}</p>
         {driving && consent.state === 'not_granted' && (
@@ -201,7 +210,7 @@ export default function DriverTrip({ riderId, rideId }: Props) {
 
       <section className="mt-4 rounded-3xl border border-[var(--line)] p-6">
         <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Status</p>
-        <p className="mt-1 display-font text-2xl font-semibold text-[var(--ink)]">
+        <p aria-live="polite" className="mt-1 display-font text-2xl font-semibold text-[var(--ink)]">
           {phase === 'scheduled' && 'Accepted. Head to the pickup when ready'}
           {phase === 'en_route' && 'Driving to pickup'}
           {phase === 'arrived' && 'At pickup. Waiting for the rider'}

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 const { geocode, firstMatch, fetchRoute } = vi.hoisted(() => ({ geocode: vi.fn(), firstMatch: vi.fn(), fetchRoute: vi.fn() }))
@@ -12,6 +12,7 @@ vi.mock('../lib/useAuth', () => ({ useAuth: () => ({ user: authState.user, loadi
 import NewRide from './NewRide'
 import { listRides } from '../storage'
 import { renderWithRouter } from '../../test/router'
+import { expectNoA11yViolations } from '../../test/axe'
 
 function mount(path = '/new') { const wrap = renderWithRouter(<NewRide />, path); render(wrap.ui); return wrap }
 
@@ -219,7 +220,7 @@ describe('NewRide (signed in: live quotes)', () => {
   it('tells riders requests are paused, and does not let them price or request', async () => {
     serve({ paused: true })
     mount()
-    expect(await screen.findByRole('status')).toHaveTextContent('New ride requests are paused for a short time')
+    expect(await within(screen.getByRole('region', { name: 'Quotes' })).findByRole('status')).toHaveTextContent('New ride requests are paused for a short time')
     await userEvent.type(screen.getByPlaceholderText('Enter pickup'), 'Central')
     await userEvent.type(screen.getByPlaceholderText('Where are you going?'), 'North')
     expect(screen.getByRole('button', { name: 'Get quotes' })).toBeDisabled()
@@ -232,5 +233,43 @@ describe('NewRide (signed in: live quotes)', () => {
     await userEvent.click(await screen.findByRole('button', { name: /Request RideShare · \$11\.50/ }))
     expect(await screen.findByRole('alert')).toHaveTextContent('New ride requests are paused')
     expect(screen.getByRole('button', { name: /Refresh quotes/ })).toBeDisabled()
+  })
+})
+
+describe('NewRide accessibility', () => {
+  it.each(['/new', '/new?when=later', '/new?when=repeat'])('has no axe violations at %s', async (path) => {
+    const wrap = renderWithRouter(<NewRide />, path)
+    const { container } = render(wrap.ui)
+    await expectNoA11yViolations(container)
+  })
+
+  it('exposes the booking mode and the ride choice as pressed state, not just colour', async () => {
+    mount()
+    const group = screen.getByRole('group', { name: 'When do you want to ride?' })
+    expect(within(group).getByRole('button', { name: 'Ride now' })).toHaveAttribute('aria-pressed', 'true')
+    await userEvent.click(within(group).getByRole('button', { name: 'Later' }))
+    expect(within(group).getByRole('button', { name: 'Later' })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(group).getByRole('button', { name: 'Ride now' })).toHaveAttribute('aria-pressed', 'false')
+    await userEvent.click(within(group).getByRole('button', { name: 'Routine' }))
+    expect(within(group).getByRole('button', { name: 'Routine' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('names the back button and labels both address fields', () => {
+    mount()
+    expect(screen.getByRole('button', { name: 'Back to rides' })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Pickup' })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Destination' })).toBeInTheDocument()
+  })
+
+  it('shows errors in an alert', async () => {
+    mount()
+    await userEvent.click(screen.getByRole('button', { name: 'Later' }))
+    firstMatch.mockReset()
+    firstMatch.mockRejectedValueOnce(new Error('We could not find that address'))
+    await userEvent.type(screen.getByRole('combobox', { name: 'Pickup' }), 'Nowhere')
+    await userEvent.type(screen.getByRole('combobox', { name: 'Destination' }), 'Elsewhere')
+    await userEvent.click(screen.getByRole('button', { name: 'Reserve ride' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('We could not find that address')
+    firstMatch.mockReset() // do not leak the rejection into other tests
   })
 })

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { renderWithRouter } from '../../test/router'
 import userEvent from '@testing-library/user-event'
+import { expectNoA11yViolations } from '../../test/axe'
 
 const { actions, tel } = vi.hoisted(() => ({ actions: { call: vi.fn() }, tel: { reportError: vi.fn() } }))
 vi.mock('../lib/telemetry', async (importOriginal) => ({ ...(await importOriginal<typeof import('../lib/telemetry')>()), reportError: tel.reportError }))
@@ -77,4 +78,26 @@ describe('DriverOffers', () => {
     await screen.findByText(/Assigned to you/)
     expect(tel.reportError).not.toHaveBeenCalled()
   })
+
+  it('has no accessibility violations for an offer and for an assigned trip', async () => {
+    actions.call.mockResolvedValue([offer('offered')])
+    const first = render(renderWithRouter(<DriverOffers />).ui)
+    await screen.findByRole('button', { name: 'Accept' })
+    await expectNoA11yViolations(first.container)
+    first.unmount()
+    actions.call.mockResolvedValue([offer('accepted')])
+    const second = render(renderWithRouter(<DriverOffers />).ui)
+    await screen.findByRole('button', { name: 'Open trip' })
+    await expectNoA11yViolations(second.container)
+  })
+
+  it('lets a driver accept or decline from the keyboard', async () => {
+    actions.call.mockResolvedValue([offer('offered')])
+    render(renderWithRouter(<DriverOffers />).ui)
+    const accept = await screen.findByRole('button', { name: 'Accept' })
+    accept.focus()
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(actions.call).toHaveBeenCalledWith('accept_offer', expect.anything()))
+  })
+
 })

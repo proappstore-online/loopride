@@ -11,7 +11,7 @@ export default function NotificationBell({ signedIn }: { signedIn: boolean }) {
   if (!signedIn) return null
 
   return (
-    <div className="relative">
+    <div className="relative" onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false) }}>
       <button onClick={() => setOpen((o) => !o)} aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'} aria-expanded={open} className="relative rounded-full border border-[var(--line)] px-3 py-1 text-xs font-semibold text-[var(--ink)] hover:bg-[var(--accent-soft)]">
         🔔
         {unread > 0 && <span className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[var(--error)] px-1 text-[10px] font-bold text-white">{unread}</span>}
@@ -33,7 +33,7 @@ export default function NotificationBell({ signedIn }: { signedIn: boolean }) {
                           setOpen(false)
                           setLocation(n.link)
                         }}
-                        className={`block w-full rounded-xl px-3 py-2 text-left hover:bg-[var(--accent-soft)] ${n.readAt === null ? '' : 'opacity-60'}`}
+                        className={`block w-full rounded-xl px-3 py-2 text-left hover:bg-[var(--accent-soft)] ${n.readAt === null ? 'font-bold' : ''}`}
                       >
                         <span className="block text-xs font-bold text-[var(--ink)]">{text.title}</span>
                         <span className="block text-xs text-[var(--muted)]">{text.body}</span>

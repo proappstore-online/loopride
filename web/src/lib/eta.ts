@@ -73,3 +73,12 @@ export function formatEta(seconds: number): string {
   const m = Math.round(seconds / 60)
   return m === 1 ? '1 min' : `${m} min`
 }
+
+/** Where the driver is, in words, from the age of their last position. */
+export function locationSummary(state: Freshness | null, ageSec: number | null): string {
+  if (state === 'live') return `Live, updated ${ageSec ?? 0} seconds ago`
+  if (state === 'delayed') return `Delayed, last updated ${ageSec ?? 0} seconds ago`
+  if (state === 'stale') return `Last seen ${Math.max(1, Math.round((ageSec ?? 0) / 60))} minutes ago`
+  if (state === 'offline') return 'Driver is offline'
+  return 'No live location yet'
+}

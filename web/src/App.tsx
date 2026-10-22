@@ -35,24 +35,43 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // After a screen change, announce it: set the tab title from the heading and move focus to the content.
+  const main = useRef<HTMLElement | null>(null)
+  const shown = useRef<string | null>(null)
+  useEffect(() => {
+    const heading = main.current?.querySelector('h1')?.textContent?.trim()
+    document.title = heading ? `${heading} — RideShare` : 'RideShare — rides on your schedule'
+    // Only a real change of screen moves focus (the first render, and a repeated effect run, do not).
+    const changed = shown.current !== null && shown.current !== location
+    shown.current = location
+    if (!changed) return
+    main.current?.focus({ preventScroll: true })
+    window.scrollTo(0, 0)
+  }, [location])
+
   return (
-    <Switch>
-      <Route path="/" component={Home} />
-      <Route path="/new" component={NewRide} />
-      <Route path="/account" component={Account} />
-      <Route path="/trip/:rideId">
-        {(params) => <Trip rideId={params.rideId} />}
-      </Route>
-      <Route path="/driver" component={DriverHome} />
-      <Route path="/driver/onboarding" component={DriverOnboarding} />
-      <Route path="/ops" component={Ops} />
-      <Route path="/driver/trip/:riderId/:rideId">
-        {(params) => <DriverTrip riderId={params.riderId} rideId={params.rideId} />}
-      </Route>
-      <Route>
-        <NotFound />
-      </Route>
-    </Switch>
+    <>
+      <a href="#main" className="skip-link" onClick={(e) => { e.preventDefault(); main.current?.focus() }}>Skip to content</a>
+      <main id="main" ref={main} tabIndex={-1}>
+        <Switch>
+          <Route path="/" component={Home} />
+          <Route path="/new" component={NewRide} />
+          <Route path="/account" component={Account} />
+          <Route path="/trip/:rideId">
+            {(params) => <Trip rideId={params.rideId} />}
+          </Route>
+          <Route path="/driver" component={DriverHome} />
+          <Route path="/driver/onboarding" component={DriverOnboarding} />
+          <Route path="/ops" component={Ops} />
+          <Route path="/driver/trip/:riderId/:rideId">
+            {(params) => <DriverTrip riderId={params.riderId} rideId={params.rideId} />}
+          </Route>
+          <Route>
+            <NotFound />
+          </Route>
+        </Switch>
+      </main>
+    </>
   )
 }
 
