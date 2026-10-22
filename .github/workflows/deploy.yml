@@ -151,7 +151,28 @@ jobs:
         env:
           E2E_BASE_URL: https://${{ github.event.repository.name }}.proappstore.online
           E2E_SESSION_TOKEN: ${{ secrets.PAS_E2E_SESSION_TOKEN }}
+          # The live journey matrix (issue #17, docs/e2e-matrix.md): one throwaway account per role.
+          # Without them the matrix skips with a message and the rest of the suite still runs.
+          E2E_RIDER_TOKEN: ${{ secrets.PAS_E2E_RIDER_TOKEN }}
+          E2E_DRIVER_TOKEN: ${{ secrets.PAS_E2E_DRIVER_TOKEN }}
+          E2E_DRIVER2_TOKEN: ${{ secrets.PAS_E2E_DRIVER2_TOKEN }}
+          E2E_OPS_TOKEN: ${{ secrets.PAS_E2E_OPS_TOKEN }}
+          E2E_SLOW: ${{ vars.E2E_SLOW }}
         run: npx playwright test
+      - name: Journey matrix summary (failures name the owning issue)
+        if: always()
+        working-directory: e2e
+        run: node report.mjs results.json
+      - name: Upload failure artifacts (action trails, traces, screenshots)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts-${{ github.sha }}
+          path: |
+            e2e/test-results/
+            e2e/results.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Publish test results (kb.proappstore.online/<app>/.e2e/summary.json)
         if: always()
         working-directory: e2e

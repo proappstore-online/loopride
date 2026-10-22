@@ -13,3 +13,9 @@ coverage/
 # Live E2E (e2e/) run output
 e2e/results.json
 e2e/summary.json
+
+# E2E outputs
+e2e/results.json
+e2e/summary.json
+e2e/test-results/
+e2e/playwright-report/

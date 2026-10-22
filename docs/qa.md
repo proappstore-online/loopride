@@ -21,6 +21,8 @@ platform only injects its baseline smoke when no specs exist.
 
 - `smoke.spec.ts`: the app boots, and the sign-in state is correct.
 - `rideshare.spec.ts`: rider trip planning, and switching between rider and driver.
+- `matrix.spec.ts`: the live journey matrix (request to completion, no driver, re-dispatch, cancellation,
+  stale GPS, rider report, driver suspension). Needs four test accounts; see [e2e-matrix.md](e2e-matrix.md).
 
 A ticket that changes a user-facing flow adds or updates a spec in the same
 change. Signed-in specs skip until the repo secret `PAS_E2E_SESSION_TOKEN`
