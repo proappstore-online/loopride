@@ -9,6 +9,7 @@ import DriverTrip from './views/DriverTrip'
 import Account from './views/Account'
 import DriverOnboarding from './views/DriverOnboarding'
 import Ops from './views/Ops'
+import PilotNotice from './components/PilotNotice'
 import { getRole } from './lib/mode'
 import { useRideSync } from './lib/rideSync'
 import { runRetention } from './lib/privacy'
@@ -52,6 +53,7 @@ export default function App() {
   return (
     <>
       <a href="#main" className="skip-link" onClick={(e) => { e.preventDefault(); main.current?.focus() }}>Skip to content</a>
+      <PilotNotice />
       <main id="main" ref={main} tabIndex={-1}>
         <Switch>
           <Route path="/" component={Home} />

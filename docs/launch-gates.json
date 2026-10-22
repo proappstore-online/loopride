@@ -1,0 +1,246 @@
+{
+  "description": "Launch gates for RideShare (issue #18). Source of truth for what must be approved before the product is anything more than a demo or pilot. Read by web/src/lib/launch.test.ts. A gate is approved only with an accountable owner, evidence, an approver and a date. LAUNCH_STAGE in web/src/lib/launch.ts must stay 'pilot' until every critical gate is approved.",
+  "statuses": [
+    "not_started",
+    "in_progress",
+    "ready_for_approval",
+    "approved"
+  ],
+  "gates": [
+    {
+      "id": "insurance",
+      "title": "Insurance covers rides, riders, drivers and the platform",
+      "area": "insurance",
+      "critical": true,
+      "why": "Real people are carried in real vehicles. Which cover applies (driver personal, commercial, per-trip, platform liability) depends on place and arrangement.",
+      "evidenceRequired": "Policy documents or broker confirmation for each place and vehicle use, with limits, named insured and dates; who is notified of a claim.",
+      "builtInRepo": "Nothing. The app does not hold or check insurance.",
+      "dependsOn": [],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "transport-rules",
+      "title": "Local transport rules are satisfied in every place of operation",
+      "area": "local_transport_rules",
+      "critical": true,
+      "why": "Many places license ride-hailing operators, vehicles and drivers, and restrict fares, areas or vehicle types.",
+      "evidenceRequired": "A written determination by someone qualified for each place: licences required, held or not needed, conditions, and the places the service may operate. The app is limited to those places.",
+      "builtInRepo": "Nothing. The app does not restrict by place.",
+      "dependsOn": [],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "driver-screening",
+      "title": "Driver screening is defined, run and recorded",
+      "area": "driver_screening",
+      "critical": true,
+      "why": "Approval today checks only that a licence number, region, expiry and a vehicle were supplied and a staff member approved. No background, identity, licence or vehicle-inspection check is made.",
+      "evidenceRequired": "The screening standard (identity, licence verification, criminal and driving record, vehicle inspection, re-check interval) per place, who performs it, and a sample record for each approved driver.",
+      "builtInRepo": "Driver application and staff approval workflow (#4); suspension (#12). Not the checks themselves.",
+      "dependsOn": [
+        "#4",
+        "#12"
+      ],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "taxes",
+      "title": "Tax treatment of fares, fees and payouts is decided and set up",
+      "area": "taxes",
+      "critical": true,
+      "why": "ADR 0001 left the tax rate, who collects and remits it, and driver tax reporting undecided. The ledger records a rate of zero.",
+      "evidenceRequired": "An accountant's or adviser's written treatment per place: rates, who is liable, registrations, invoice and receipt wording, driver reporting duties; the policy version set in the ledger.",
+      "builtInRepo": "Immutable fare ledger and receipts (#9). No money is collected or paid out.",
+      "dependsOn": [
+        "#9"
+      ],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "payments",
+      "title": "Money movement is approved, or the pilot is confirmed free of it",
+      "area": "payments",
+      "critical": true,
+      "why": "No payment is collected and no driver is paid (ADR 0001). The platform rule against in-app payments needs an explicit decision before real fares exist.",
+      "evidenceRequired": "Either the platform's written decision and a provider integration with refunds and disputes tested, or a recorded decision that the pilot charges nothing and what riders and drivers are told.",
+      "builtInRepo": "Ledger, receipts and refund-request records (#9, #11). Executing refunds waits on payments.",
+      "dependsOn": [
+        "#9"
+      ],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "terms",
+      "title": "Terms of service for riders and drivers are written, reviewed and shown",
+      "area": "terms",
+      "critical": true,
+      "why": "The app contains no terms and asks nobody to accept any.",
+      "evidenceRequired": "The reviewed terms text for riders and for drivers, the version identifier, where and when each person accepts, and where acceptance is recorded.",
+      "builtInRepo": "Nothing. There is no terms screen or acceptance record.",
+      "dependsOn": [],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "privacy-policy",
+      "title": "The privacy notice and every open privacy decision are approved",
+      "area": "privacy",
+      "critical": true,
+      "why": "docs/privacy.md lists decisions that are legal choices and were left open: retention of audit and financial records, subject-access scope, jurisdiction, age, inactive accounts.",
+      "evidenceRequired": "The published privacy notice, and for each \"needs a human decision\" item in docs/privacy.md and docs/safety.md a recorded decision or an accepted risk; the data-protection contact.",
+      "builtInRepo": "Inventory, consent, retention, export and erasure (#13). Every open item is marked needs-human.",
+      "dependsOn": [
+        "#13"
+      ],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "safety-policy",
+      "title": "Safety policy, emergency wording and escalation are approved",
+      "area": "safety",
+      "critical": true,
+      "why": "The emergency guidance is deliberately jurisdiction-neutral and has not been reviewed for any place. Nothing pages anyone for an urgent report.",
+      "evidenceRequired": "Review of SAFETY_COPY for each place; the out-of-hours arrangement (who watches the Safety tab and when); the rule for referring reports to authorities; the appeal route for blocks and suspensions.",
+      "builtInRepo": "Safety button, reports, escalation, blocks and runbook (#12). Alert after 5 minutes.",
+      "dependsOn": [
+        "#12"
+      ],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "support",
+      "title": "Support coverage, hours and contact are in place",
+      "area": "support_coverage",
+      "critical": true,
+      "why": "Riders and drivers need a way to reach a person, and staff need to be present while rides run. The app has no support contact or hours.",
+      "evidenceRequired": "Named staff with roles (ops, ops_pii), hours of cover matched to the hours rides are allowed, the support contact shown to users, and a dry run of the safety incident runbook.",
+      "builtInRepo": "Operations console, audit, runbooks (#11, #15).",
+      "dependsOn": [
+        "#11",
+        "#15"
+      ],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "operations",
+      "title": "Staff are trained and the runbooks have been rehearsed",
+      "area": "operations",
+      "critical": true,
+      "why": "Runbooks exist but nobody has used them under pressure.",
+      "evidenceRequired": "A record of a rehearsal for dispatch outage, rollback and safety incident, who took part, what was fixed afterwards.",
+      "builtInRepo": "Runbooks and the Health tab (#15).",
+      "dependsOn": [
+        "#15"
+      ],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "reliability",
+      "title": "The live end-to-end matrix is running and green after deploys",
+      "area": "reliability",
+      "critical": true,
+      "why": "The matrix needs four test accounts that do not exist yet.",
+      "evidenceRequired": "The PAS_E2E_* secrets set, a green run of every journey (including the slow one) on the deployed app, and who is told when it fails.",
+      "builtInRepo": "Matrix, report and fake API (#17).",
+      "dependsOn": [
+        "#17",
+        "#15"
+      ],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "accessibility",
+      "title": "Accessibility and mobile checklist run on real devices",
+      "area": "accessibility",
+      "critical": false,
+      "why": "Automated checks pass; nobody has used the app with VoiceOver or TalkBack.",
+      "evidenceRequired": "The completed manual checklist in docs/accessibility.md with device, OS and date, and the issues found.",
+      "builtInRepo": "Accessibility work and checklist (#14).",
+      "dependsOn": [
+        "#14"
+      ],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "rollback-comms",
+      "title": "Rollback and rider/driver communication plan is approved and rehearsed",
+      "area": "communications",
+      "critical": true,
+      "why": "docs/launch.md documents the steps and draft messages; nobody has approved the wording or confirmed the channels reach people.",
+      "evidenceRequired": "Approved message texts, the channels actually available, who sends, and a rehearsal of pausing dispatch and returning to pilot.",
+      "builtInRepo": "Dispatch pause, rollback runbook, pilot limit (this issue).",
+      "dependsOn": [
+        "#15"
+      ],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    },
+    {
+      "id": "incident-ownership",
+      "title": "Incident ownership and regulator/press contact are named",
+      "area": "governance",
+      "critical": true,
+      "why": "Someone must own an incident, decide what to tell people and deal with a regulator or the press.",
+      "evidenceRequired": "The incident owner and deputy, the contact for regulators and press, and the escalation order.",
+      "builtInRepo": "Escalation levels lead, safety and legal in the console (#11).",
+      "dependsOn": [
+        "#11"
+      ],
+      "status": "not_started",
+      "owner": null,
+      "evidence": [],
+      "approvedBy": null,
+      "approvedOn": null
+    }
+  ]
+}
